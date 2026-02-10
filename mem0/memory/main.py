@@ -32,6 +32,7 @@ from mem0.memory.utils import (
     parse_vision_messages,
     process_telemetry_filters,
     remove_code_blocks,
+    is_multi_speaker_format,
 )
 from mem0.utils.factory import (
     EmbedderFactory,
@@ -278,6 +279,17 @@ class Memory(MemoryBase):
         # Use agent memory extraction if agent_id is present and there are assistant messages
         return has_agent_id and has_assistant_messages
 
+    def _should_use_session_memory_extraction(self, messages):
+        """Determine whether to use session memory extraction based on multi-speaker format.
+        
+        Args:
+            messages: List of message dictionaries
+            
+        Returns:
+            bool: True if messages are in multi-speaker format, False otherwise
+        """
+        return is_multi_speaker_format(messages[0]) if messages and len(messages) > 0 else False
+
     def add(
         self,
         messages,
@@ -386,24 +398,36 @@ class Memory(MemoryBase):
     def _add_to_vector_store(self, messages, metadata, filters, infer):
         if not infer:
             returned_memories = []
+
             for message_dict in messages:
-                if (
-                    not isinstance(message_dict, dict)
-                    or message_dict.get("role") is None
-                    or message_dict.get("content") is None
-                ):
-                    logger.warning(f"Skipping invalid message format: {message_dict}")
-                    continue
-
-                if message_dict["role"] == "system":
-                    continue
-
                 per_msg_meta = deepcopy(metadata)
-                per_msg_meta["role"] = message_dict["role"]
+                # Check for multi-speaker format
+                if is_multi_speaker_format(message_dict):
+                    actor_name = message_dict["speaker"]["name"]
+                    actor_id = message_dict["speaker"]["id"]
+                    if "role" not in message_dict:
+                        message_dict["role"] = "owner"  # Default role if not present
 
-                actor_name = message_dict.get("name")
-                if actor_name:
-                    per_msg_meta["actor_id"] = actor_name
+                    per_msg_meta["role"] = message_dict["role"]
+                    per_msg_meta["speaker_id"] = actor_id
+                    per_msg_meta["speaker_name"] = actor_name
+                else:
+                    # Original role-based format validation
+                    if (
+                        not isinstance(message_dict, dict)
+                        or message_dict.get("role") is None
+                        or message_dict.get("content") is None
+                    ):
+                        logger.warning(f"Skipping invalid message format: {message_dict}")
+                        continue
+
+                    if message_dict["role"] == "system":
+                        continue
+    
+                    per_msg_meta["role"] = message_dict["role"]
+                    actor_name = message_dict.get("name")
+                    if actor_name:
+                        per_msg_meta["actor_id"] = actor_name
 
                 msg_content = message_dict["content"]
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
@@ -429,7 +453,9 @@ class Memory(MemoryBase):
             # Determine if this should use agent memory extraction based on agent_id presence
             # and role types in messages
             is_agent_memory = self._should_use_agent_memory_extraction(messages, metadata)
-            system_prompt, user_prompt = get_fact_retrieval_messages(parsed_messages, is_agent_memory)
+            is_multi_speaker_memory = self._should_use_session_memory_extraction(messages)
+
+            system_prompt, user_prompt = get_fact_retrieval_messages(parsed_messages, is_agent_memory, is_multi_speaker_memory)
 
         response = self.llm.generate_response(
             messages=[
@@ -1328,6 +1354,18 @@ class AsyncMemory(MemoryBase):
         # Use agent memory extraction if agent_id is present and there are assistant messages
         return has_agent_id and has_assistant_messages
 
+    def _should_use_session_memory_extraction(self, messages):
+        """Determine whether to use session memory extraction based on multi-speaker format.
+        
+        Args:
+            messages: List of message dictionaries
+            
+        Returns:
+            bool: True if messages are in multi-speaker format, False otherwise
+        """
+        return is_multi_speaker_format(messages[0]) if messages and len(messages) > 0 else False
+
+
     async def add(
         self,
         messages,
@@ -1416,7 +1454,37 @@ class AsyncMemory(MemoryBase):
     ):
         if not infer:
             returned_memories = []
+
             for message_dict in messages:
+                per_msg_meta = deepcopy(metadata)
+                # Check for multi-speaker format
+                if is_multi_speaker_format(message_dict):
+                    actor_name = message_dict["speaker"]["name"]
+                    actor_id = message_dict["speaker"]["id"]
+                    if "role" not in message_dict:
+                        message_dict["role"] = "owner"  # Default role if not present
+
+                    per_msg_meta["role"] = message_dict["role"]
+                    per_msg_meta["speaker_id"] = actor_id
+                    per_msg_meta["speaker_name"] = actor_name
+
+                    msg_content = message_dict["content"]
+                    msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
+                    mem_id = await self._create_memory(msg_content, msg_embeddings, per_msg_meta)
+
+                    returned_memories.append(
+                        {
+                            "id": mem_id,
+                            "memory": msg_content,
+                            "event": "ADD",
+                            "speaker_id": actor_id,
+                            "speaker_name": actor_name,
+                            "role": message_dict["role"],
+                        }
+                    )
+                    continue
+
+                # Original role-based format validation
                 if (
                     not isinstance(message_dict, dict)
                     or message_dict.get("role") is None
@@ -1458,7 +1526,10 @@ class AsyncMemory(MemoryBase):
             # Determine if this should use agent memory extraction based on agent_id presence
             # and role types in messages
             is_agent_memory = self._should_use_agent_memory_extraction(messages, metadata)
-            system_prompt, user_prompt = get_fact_retrieval_messages(parsed_messages, is_agent_memory)
+            is_multi_speaker_memory = self._should_use_session_memory_extraction(messages)
+
+            # Use session memory extraction for multi-speaker conversations
+            system_prompt, user_prompt = get_fact_retrieval_messages(parsed_messages, is_agent_memory, is_multi_speaker_memory)
 
         response = await asyncio.to_thread(
             self.llm.generate_response,

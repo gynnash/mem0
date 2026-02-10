@@ -5,21 +5,25 @@ from mem0.configs.prompts import (
     FACT_RETRIEVAL_PROMPT,
     USER_MEMORY_EXTRACTION_PROMPT,
     AGENT_MEMORY_EXTRACTION_PROMPT,
+    SESSION_MEMORY_EXTRACTION_PROMPT,
 )
 
 
-def get_fact_retrieval_messages(message, is_agent_memory=False):
+def get_fact_retrieval_messages(message, is_agent_memory=False, is_multi_speaker_memory=False):
     """Get fact retrieval messages based on the memory type.
-    
+
     Args:
         message: The message content to extract facts from
         is_agent_memory: If True, use agent memory extraction prompt, else use user memory extraction prompt
-        
+        is_multi_speaker_memory: If True, use session memory extraction prompt for multi-speaker conversations
+
     Returns:
         tuple: (system_prompt, user_prompt)
     """
     if is_agent_memory:
         return AGENT_MEMORY_EXTRACTION_PROMPT, f"Input:\n{message}"
+    elif is_multi_speaker_memory:
+        return SESSION_MEMORY_EXTRACTION_PROMPT, f"Input:\n{message}"
     else:
         return USER_MEMORY_EXTRACTION_PROMPT, f"Input:\n{message}"
 
@@ -29,16 +33,48 @@ def get_fact_retrieval_messages_legacy(message):
     return FACT_RETRIEVAL_PROMPT, f"Input:\n{message}"
 
 
+def is_multi_speaker_format(message):
+    """Check if messages are in multi-speaker format."""
+    if not isinstance(message, dict) or not message:
+        return False
+    # Check if first message has 'speaker' field with 'id' and 'name'
+    return (
+        isinstance(message, dict)
+        and "speaker" in message
+        and isinstance(message["speaker"], dict)
+        and "id" in message["speaker"]
+        and "name" in message["speaker"]
+        and "content" in message
+    )
+
+
 def parse_messages(messages):
+    """Parse messages supporting both OpenAI format and multi-speaker format.
+
+    OpenAI format: [{"role": "user", "content": "xxx"}, ...]
+    Multi-speaker format: [{"speaker": {"id": "1", "name": "a"}, "content": "xxx"}, ...]
+    """
     response = ""
+
+    # Process each message individually based on its format
     for msg in messages:
-        if msg["role"] == "system":
-            response += f"system: {msg['content']}\n"
-        if msg["role"] == "user":
-            response += f"user: {msg['content']}\n"
-        if msg["role"] == "assistant":
-            response += f"assistant: {msg['content']}\n"
-    return response
+        # Check if this specific message has speaker format
+        if is_multi_speaker_format(msg):
+            speaker_name = msg["speaker"]["name"]
+            speaker_id = msg["speaker"]["id"]
+            content = msg["content"]
+            role = msg.get("role", "")
+            if role:
+                response += f"{role}#{speaker_name}#{speaker_id}: {content}\n"
+            else:
+                response += f"{speaker_name} # {speaker_id}: {content}\n"
+        elif msg.get("role") and msg.get("content"):
+            # Traditional role format
+            role = msg.get("role")
+            content = msg.get("content", "")
+            response += f"{role}: {content}\n"
+
+    return response.strip()
 
 
 def format_entities(entities):

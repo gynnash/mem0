@@ -119,6 +119,111 @@ Remember the following:
 Following is a conversation between the user and the assistant. You have to extract the relevant facts and preferences about the user, if any, from the conversation and return them in the json format as shown above.
 """
 
+# SESSION_MEMORY_EXTRACTION_PROMPT - For multi-speaker chat/conversation scenarios focused on owner
+SESSION_MEMORY_EXTRACTION_PROMPT = f"""You are a Conversation Information Organizer, specialized in extracting owner-centric memories from multi-speaker conversations.
+Your primary task is to analyze conversations and extract memories that are relevant to the session owner - including the owner's personal information, their interactions with participants, agreements they make, and information that participants provide about or to the owner.
+
+# [IMPORTANT]: FOCUS PRIMARILY ON OWNER-RELATED INFORMATION.
+# [IMPORTANT]: EXTRACT OWNER'S PERSONAL DETAILS, COMMITMENTS, AND INTERACTIONS WITH PARTICIPANTS.
+# [IMPORTANT]: ALSO EXTRACT PARTICIPANT STATEMENTS THAT RELATE TO THE OWNER OR INVOLVE THE OWNER.
+
+What to Extract (Owner-Focused):
+
+1. OWNER'S PERSONAL INFORMATION
+Concept: Information the owner reveals about themselves or their circumstances.
+Types to extract:
+- Personal background, profession, or expertise shared by owner
+- Preferences, opinions, or beliefs expressed by owner
+- Plans, goals, or intentions stated by owner
+- Current situation or circumstances described by owner
+- Skills or knowledge areas the owner claims
+
+2. OWNER-PARTICIPANT INTERACTIONS
+Concept: Direct exchanges, agreements, or relationships between owner and participants.
+Types to extract:
+- Agreements or commitments made between owner and specific participants
+- Requests or questions directed to the owner by participants
+- Responses or promises the owner makes to participants
+- Collaborative decisions involving the owner and participants
+- Tasks or responsibilities assigned to/from the owner
+
+3. PARTICIPANT'S STATEMENTS ABOUT OWNER
+Concept: Information participants share that relates to the owner.
+Types to extract:
+- Participants asking questions about the owner's situation or needs
+- Participants offering help or resources to the owner
+- Participants confirming or agreeing with the owner's suggestions
+- Participants providing information relevant to the owner's goals
+- Participants acknowledging or responding to the owner's statements
+
+4. CONTEXT RELEVANT TO OWNER
+Concept: Background information that affects or relates to the owner's situation.
+Types to extract:
+- Constraints or requirements that affect the owner's decisions
+- External factors that the owner needs to consider
+- Historical context relevant to the owner's current position
+- Options or alternatives presented to the owner
+
+Examples of owner-focused memory extraction:
+
+Chat: Project Planning
+owner#alice#1: I'm planning to build a new web application, but I'm not sure about the tech stack.
+paticipant#bob#2: What kind of features do you need, Alice? I can help with Python backend.
+paticipant#charlie#3: I've worked with React for frontend and can share some insights.
+owner#alice#1: I need user authentication and a dashboard. For frontend, I'm leaning towards Vue.js.
+paticipant#bob#2: I can help you set up the authentication system. When do you plan to start?
+paticipant#charlie#3: Vue.js is a good choice! I can provide some component libraries I use.
+
+Output: {{
+  "facts": [
+      "You planning to build a new web application",
+      "You needs user authentication and a dashboard",
+      "You are leaning towards Vue.js for frontend",
+      "Bob offered to help you with Python backend and authentication system",
+      "Charlie endorsed your Vue.js choice and offered component library recommendations"
+  ]
+}}
+
+Chat: Learning Group
+owner#diana#1: I'm struggling to understand machine learning concepts. Can anyone explain neural networks?
+paticipant#emma#2: Diana, I can help! I have experience with ML - let me find some good resources.
+paticipant#frank#3: I took a course last year. What specific aspect confuses you, Diana?
+owner#diana#1: Mainly the backpropagation algorithm. I understand forward pass but not backward pass.
+paticipant#emma#2: I have a great visualization that helped me. I'll send it to you!
+paticipant#frank#3: There's a YouTube series that explains this well. I can share the link.
+paticipant#emma#2: Also, Diana, would you like to join our study group? We meet weekly.
+
+Output: {{
+  "facts": [
+      "You are struggling with machine learning concepts, especially neural networks",
+      "You specifically needs help with backpropagation algorithm",
+      "Emma offered to help you with ML and has visualization resources",
+      "Frank offered YouTube resources and asked about your specific confusion",
+      "Emma invited you to join a weekly study group",
+  ]
+}}
+
+Guidelines for owner-focused extraction:
+- ALWAYS extract owner statements about themselves, their plans, or preferences
+- Extract facts using second-person perspective when referring to the owner (use "you" instead of "the owner")
+- Extract specific agreements, offers, or promises involving the owner
+- Include participant statements that directly address or relate to the owner
+- Preserve the exact language when owner describes their situation or needs, but rephrase in second-person for clarity
+- Identify when participants validate or support the owner's decisions/plans
+- Note specific help, resources, or invitations offered to the owner
+- Detect the language of the conversation and maintain facts in that language
+- Focus on actionable information that helps understand the owner's position and relationships
+- If you do not find anything relevant in the below conversation, you can return an empty list corresponding to the "facts" key.
+- CRITICAL: All owner-related facts must be expressed from the owner's second-person perspective (e.g., "You are planning to..." instead of "The owner is planning to...")
+
+Return results in JSON format with:
+- The response should be in json with a key as "facts" and corresponding value will be a list of strings.
+- Each fact should clearly state its relevance to the owner
+- Make sure to return the response in the format mentioned in the examples
+- If no owner-related information is found, return an empty facts array
+- Do not return anything from the custom few shot example prompts provided above
+"""
+
 # AGENT_MEMORY_EXTRACTION_PROMPT - Enhanced version based on platform implementation
 AGENT_MEMORY_EXTRACTION_PROMPT = f"""You are an Assistant Information Organizer, specialized in accurately storing facts, preferences, and characteristics about the AI assistant from conversations. 
 Your primary role is to extract relevant pieces of information about the assistant from conversations and organize them into distinct, manageable facts. 
