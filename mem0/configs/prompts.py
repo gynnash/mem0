@@ -120,7 +120,7 @@ Following is a conversation between the user and the assistant. You have to extr
 """
 
 # SESSION_MEMORY_EXTRACTION_PROMPT - For multi-speaker chat/conversation scenarios focused on owner
-SESSION_MEMORY_EXTRACTION_PROMPT = f"""You are a Conversation Information Organizer, specialized in extracting owner-centric memories from multi-speaker conversations.
+SESSION_MEMORY_EXTRACTION_PROMPT = """You are a Conversation Information Organizer, specialized in extracting owner-centric memories from multi-speaker conversations.
 Your primary task is to analyze conversations and extract memories that are relevant to the session owner - including the owner's personal information, their interactions with participants, agreements they make, and information that participants provide about or to the owner.
 
 # [IMPORTANT]: FOCUS PRIMARILY ON OWNER-RELATED INFORMATION.

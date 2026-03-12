@@ -637,10 +637,6 @@ class Memory(MemoryBase):
             if attr:
                 fact_metadata.update(attr)
 
-            # Ensure weight field exists
-            if "weight" not in fact_metadata:
-                fact_metadata["weight"] = 1.0
-
             # Check if this fact has a relationship classification
             if fact_idx not in relationship_map:
                 # No related memories found, insert as new
@@ -773,9 +769,6 @@ class Memory(MemoryBase):
             if attr:
                 fact_metadata.update(attr)
 
-            if "weight" not in fact_metadata:
-                fact_metadata["weight"] = 1.0
-
             mem_id = self._create_memory_with_attr(
                 fact_text, embedding, fact_metadata
             )
@@ -794,6 +787,13 @@ class Memory(MemoryBase):
         metadata["data"] = data
         metadata["hash"] = hashlib.md5(data.encode()).hexdigest()
         metadata["created_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+
+        if "importance" not in metadata or metadata["importance"] not in ["high", "low"]:
+            metadata["weight"] = 1.0
+        elif metadata["importance"] == "high":
+            metadata["weight"] = 1.5
+        elif metadata["importance"] == "low":
+            metadata["weight"] = 0.5
 
         self.vector_store.insert(
             vectors=[embeddings],
