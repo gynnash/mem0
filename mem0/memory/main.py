@@ -7,6 +7,7 @@ import logging
 import os
 import uuid
 import warnings
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -177,6 +178,8 @@ class Memory(MemoryBase):
 
         self.custom_fact_extraction_prompt = self.config.custom_fact_extraction_prompt
         self.custom_update_memory_prompt = self.config.custom_update_memory_prompt
+        print(f"self.config.embedder.provider: {self.config.embedder.provider}")
+        print(f"self.config.embedder.config: {self.config.embedder.config}")
         self.embedding_model = EmbedderFactory.create(
             self.config.embedder.provider,
             self.config.embedder.config,
@@ -499,14 +502,16 @@ class Memory(MemoryBase):
         if run_id:
             search_filters["run_id"] = run_id
 
-        # Collect all related old memories for batch processing
+        # Process each new fact individually with its related memories
+        all_relationships = defaultdict(list)  # Collect all relationships from all facts
         all_old_memories = {}  # Map memory_id -> memory data
 
         for fact_data in facts_with_embeddings:
             fact_text = fact_data["fact"]
             embedding = fact_data["embedding"]
+            fact_idx = fact_data["index"]
 
-            # Search for similar memories
+            # Search for similar memories for this specific fact
             existing_memories = self.vector_store.search(
                 query=fact_text,
                 vectors=embedding,
@@ -514,8 +519,19 @@ class Memory(MemoryBase):
                 filters=search_filters,
             )
 
+            # If no related memories found, this fact will be added as new
+            if not existing_memories:
+                continue
+
+            # Collect related old memories for this fact
+            old_memories_for_fact = []
             for mem in existing_memories:
                 mem_id = mem.id
+                old_memories_for_fact.append({
+                    "id": mem_id,
+                    "text": mem.payload.get("data", ""),
+                })
+                # Store in global map for later processing
                 if mem_id not in all_old_memories:
                     all_old_memories[mem_id] = {
                         "id": mem_id,
@@ -523,38 +539,40 @@ class Memory(MemoryBase):
                         "payload": mem.payload,
                     }
 
-        # If no related memories found for any fact, insert all as new
-        if not all_old_memories:
+            # Classify relationships for this fact with its related memories
+            fact_for_classification = [{
+                "index": fact_idx,
+                "fact": fact_text,
+            }]
+
+            print(f"fact_for_classification: {fact_for_classification}")
+            print(f"old_memories_for_fact: {old_memories_for_fact}")
+            relationship_result = self._classify_fact_relationships(
+                fact_for_classification, old_memories_for_fact
+            )
+            all_relationships[fact_idx].extend(
+                [{"old_fact_id": rel.get("old_fact_id", ""),
+                  "relationship": rel.get("relationship", "")}
+                for rel in relationship_result.get("relationships", [])]
+            )
+
+        # If no relationships found (no related memories for any fact), insert all as new
+        if not all_relationships:
             logger.info("No related memories found, inserting all facts as new")
-            return self._insert_new_facts(
+            return self._insert_new_facts_with_attr(
                 facts_with_embeddings, processed_metadata, user_id
             )
 
-        # Prepare batch input for relationship classification
-        # Process all facts since they all potentially have related memories
-        facts_for_classification = [
-            {"index": fact_data["index"], "fact": fact_data["fact"]}
-            for fact_data in facts_with_embeddings
-        ]
-
-        old_memories_list = [
-            {"id": mem_id, "text": mem_data["text"]}
-            for mem_id, mem_data in all_old_memories.items()
-        ]
-
-        # Call LLM once for all relationships
-        relationship_results = self._classify_fact_relationships(
-            facts_for_classification, old_memories_list
-        )
-
-        # Process results based on relationships
-        return self._process_relationship_results(
+        # Process all relationships together
+        print(f"all_relationships: {all_relationships}")
+        result = self._process_relationship_results(
             facts_with_embeddings,
-            relationship_results,
+            all_relationships,
             all_old_memories,
             processed_metadata,
             user_id,
         )
+        return result
 
     def _classify_fact_relationships(self, new_facts, old_memories):
         """
@@ -567,16 +585,19 @@ class Memory(MemoryBase):
         Returns:
             dict: Parsed JSON response with relationships array
         """
+        print("_classify_fact_relationships")
         if not new_facts or not old_memories:
             return {"relationships": []}
 
         messages = get_fact_relationship_messages(new_facts, old_memories)
+        # print(f"relation messages: {messages}")
 
         try:
             response = self.llm.generate_response(
                 messages=messages,
                 response_format={"type": "json_object"},
             )
+            print(f"relation response: {response}")
             response = remove_code_blocks(response)
 
             if not response or not response.strip():
@@ -607,27 +628,30 @@ class Memory(MemoryBase):
         """
         Process facts based on their classified relationships with existing memories.
 
-        Handles five relationship types:
-        - IDENTICAL: Increment old fact weight by 0.2, discard new fact
-        - MORE_COMPLETE: Update old fact's embedding with new fact's embedding
-        - LESS_COMPLETE: Increment old fact weight by 0.1, discard new fact
-        - PARAPHRASE: Increment old fact weight by 0.2, discard new fact
-        - CONTRADICT: Set old fact weight to 0, insert new fact
+        relationship_results format: {
+            fact_index: [
+                {"old_fact_id": "id1", "relationship": "IDENTICAL"},
+                {"old_fact_id": "id2", "relationship": "MORE_COMPLETE"},
+                ...
+            ],
+            ...
+        }
+
+        For each new fact, process ALL its relationships with old facts.
         """
         results = []
+        processed_facts = set()  # Track which facts have been processed
 
-        # Create lookup for relationships by new fact index
-        relationship_map = {}
-        for rel in relationship_results.get("relationships", []):
-            new_idx = rel.get("new_fact_index")
-            if new_idx is not None:
-                relationship_map[new_idx] = rel
-
+        # Process each fact and all its relationships
         for fact_data in facts_with_embeddings:
             fact_idx = fact_data["index"]
             fact_text = fact_data["fact"]
             attr = fact_data["attr"]
             embedding = fact_data["embedding"]
+
+            # Skip if already processed
+            if fact_idx in processed_facts:
+                continue
 
             # Prepare metadata with attr and user_id
             fact_metadata = deepcopy(base_metadata)
@@ -637,8 +661,13 @@ class Memory(MemoryBase):
             if attr:
                 fact_metadata.update(attr)
 
-            # Check if this fact has a relationship classification
-            if fact_idx not in relationship_map:
+            # Get the new fact's ID from attr
+            new_fact_id = attr.get("id", "") if attr else ""
+
+            # Get relationships for this fact
+            relationships = relationship_results.get(fact_idx, [])
+
+            if not relationships:
                 # No related memories found, insert as new
                 mem_id = self._create_memory_with_attr(
                     fact_text, embedding, fact_metadata
@@ -648,113 +677,144 @@ class Memory(MemoryBase):
                     "memory": fact_text,
                     "event": "ADD",
                 })
+                processed_facts.add(fact_idx)
                 continue
 
-            rel = relationship_map[fact_idx]
-            relationship = rel.get("relationship", "")
-            old_fact_id = rel.get("old_fact_id")
+            # Process each relationship for this fact
+            for rel in relationships:
+                relationship = rel.get("relationship", "")
+                old_fact_id = rel.get("old_fact_id")
 
-            if not old_fact_id or old_fact_id not in all_old_memories:
-                # Invalid old fact ID, insert as new
-                mem_id = self._create_memory_with_attr(
-                    fact_text, embedding, fact_metadata
-                )
-                results.append({
-                    "id": mem_id,
-                    "memory": fact_text,
-                    "event": "ADD",
-                })
-                continue
+                if not old_fact_id or old_fact_id not in all_old_memories:
+                    # Invalid old fact ID, skip this relationship
+                    continue
 
-            old_memory = all_old_memories[old_fact_id]
-            old_payload = old_memory["payload"]
+                old_memory = all_old_memories[old_fact_id]
+                old_payload = old_memory["payload"]
 
-            if relationship == "IDENTICAL":
-                # Increment old fact weight by 0.2, discard new fact
-                old_weight = old_payload.get("weight", 1.0)
-                new_weight = old_weight + 0.2
+                # Check if both are todos and handle status changes
+                old_memory_type = old_payload.get("memory_type")
+                new_memory_type = attr.get("memory_type") if attr else None
+                old_status = old_payload.get("status")
+                new_status = attr.get("status") if attr else None
 
-                self._update_memory_weight(old_fact_id, new_weight, old_payload)
-                results.append({
-                    "id": old_fact_id,
-                    "memory": old_memory["text"],
-                    "event": "UPDATE_WEIGHT",
-                    "old_weight": old_weight,
-                    "new_weight": new_weight,
-                    "reason": "IDENTICAL: New fact identical to existing",
-                })
+                # Handle todo status changes
+                if (old_memory_type == "todo" and new_memory_type == "todo" and
+                    old_status and new_status and old_status != new_status):
+                    # Update status for todo memories
+                    print(f"TODO_STATUS_CHANGE - old_fact: {old_memory['text']}; new_fact: {fact_text}")
+                    print(f"Status change: {old_status} -> {new_status}")
 
-            elif relationship == "MORE_COMPLETE":
-                # Update old fact's embedding with new fact's embedding
-                self._update_memory_embedding(old_fact_id, embedding, fact_text, old_payload)
-                results.append({
-                    "id": old_fact_id,
-                    "memory": fact_text,
-                    "event": "UPDATE_EMBEDDING",
-                    "reason": "MORE_COMPLETE: New fact has more information",
-                })
+                    # Get the current fact's memory_id from attr
+                    current_memory_id = attr.get("memory_id") if attr else None
 
-            elif relationship == "LESS_COMPLETE":
-                # Increment old fact weight by 0.1, discard new fact
-                old_weight = old_payload.get("weight", 1.0)
-                new_weight = old_weight + 0.1
+                    # Update old memory with new status
+                    self._update_memory_status(
+                        old_fact_id, new_status, old_payload,
+                        change_source_fact_id=new_fact_id,
+                        new_memory_id=current_memory_id
+                    )
 
-                self._update_memory_weight(old_fact_id, new_weight, old_payload)
-                results.append({
-                    "id": old_fact_id,
-                    "memory": old_memory["text"],
-                    "event": "UPDATE_WEIGHT",
-                    "old_weight": old_weight,
-                    "new_weight": new_weight,
-                    "reason": "LESS_COMPLETE: Old fact has more information",
-                })
+                    results.append({
+                        "id": old_fact_id,
+                        "memory": old_memory["text"],
+                        "event": "UPDATE_STATUS",
+                        "old_status": old_status,
+                        "new_status": new_status,
+                        "reason": f"TODO_STATUS: Changed from {old_status} to {new_status}",
+                    })
+                    continue
 
-            elif relationship == "PARAPHRASE":
-                # Increment old fact weight by 0.2, discard new fact
-                old_weight = old_payload.get("weight", 1.0)
-                new_weight = old_weight + 0.2
+                # Process based on the relationship type
+                if relationship == "IDENTICAL":
+                    # Increment old fact weight by 0.2
+                    print(f"IDENTICAL - old_fact: {old_memory['text']}; new_fact: {fact_text}")
+                    old_weight = old_payload.get("weight", 1.0)
+                    new_weight = old_weight + 0.2
 
-                self._update_memory_weight(old_fact_id, new_weight, old_payload)
-                results.append({
-                    "id": old_fact_id,
-                    "memory": old_memory["text"],
-                    "event": "UPDATE_WEIGHT",
-                    "old_weight": old_weight,
-                    "new_weight": new_weight,
-                    "reason": "PARAPHRASE: Same meaning, different expression",
-                })
+                    # Get current fact's memory_id from attr if available
+                    current_memory_id = attr.get("memory_id") if attr else None
 
-            elif relationship == "CONTRADICT":
-                # Set old fact weight to 0, insert new fact
-                self._update_memory_weight(old_fact_id, 0.0, old_payload)
+                    self._update_memory_weight(old_fact_id, new_weight, old_payload, new_fact_id, current_memory_id)
+                    results.append({
+                        "id": old_fact_id,
+                        "memory": old_memory["text"],
+                        "event": "UPDATE_WEIGHT",
+                        "old_weight": old_weight,
+                        "new_weight": new_weight,
+                        "reason": "IDENTICAL: New fact identical to existing",
+                    })
 
-                # Insert new fact
-                mem_id = self._create_memory_with_attr(
-                    fact_text, embedding, fact_metadata
-                )
-                results.append({
-                    "id": mem_id,
-                    "memory": fact_text,
-                    "event": "ADD",
-                    "contradicted_memory_id": old_fact_id,
-                    "reason": "CONTRADICT: New fact contradicts old, old weight set to 0",
-                })
+                elif relationship == "MORE_COMPLETE":
+                    # Update old fact's embedding with new fact's embedding
+                    print(f"MORE_COMPLETE - old_fact: {old_memory['text']}; new_fact: {fact_text}")
+                    current_memory_id = attr.get("memory_id") if attr else None
+                    self._update_memory_embedding(old_fact_id, embedding, fact_text, old_payload, new_fact_id, current_memory_id)
+                    results.append({
+                        "id": old_fact_id,
+                        "memory": fact_text,
+                        "event": "UPDATE_EMBEDDING",
+                        "reason": "MORE_COMPLETE: New fact has more information",
+                    })
 
-            else:
-                # Unknown relationship, insert as new
-                mem_id = self._create_memory_with_attr(
-                    fact_text, embedding, fact_metadata
-                )
-                results.append({
-                    "id": mem_id,
-                    "memory": fact_text,
-                    "event": "ADD",
-                    "reason": f"Unknown relationship type: {relationship}",
-                })
+                elif relationship == "LESS_COMPLETE":
+                    # Increment old fact weight by 0.1
+                    print(f"LESS_COMPLETE - old_fact: {old_memory['text']}; new_fact: {fact_text}")
+                    old_weight = old_payload.get("weight", 1.0)
+                    new_weight = old_weight + 0.1
 
+                    current_memory_id = attr.get("memory_id") if attr else None
+                    self._update_memory_weight(old_fact_id, new_weight, old_payload, new_fact_id, current_memory_id)
+                    results.append({
+                        "id": old_fact_id,
+                        "memory": old_memory["text"],
+                        "event": "UPDATE_WEIGHT",
+                        "old_weight": old_weight,
+                        "new_weight": new_weight,
+                        "reason": "LESS_COMPLETE: Old fact has more information",
+                    })
+
+                elif relationship == "PARAPHRASE":
+                    # Increment old fact weight by 0.2
+                    print(f"PARAPHRASE - old_fact: {old_memory['text']}; new_fact: {fact_text}")
+                    old_weight = old_payload.get("weight", 1.0)
+                    new_weight = old_weight + 0.2
+
+                    current_memory_id = attr.get("memory_id") if attr else None
+                    self._update_memory_weight(old_fact_id, new_weight, old_payload, new_fact_id, current_memory_id)
+                    results.append({
+                        "id": old_fact_id,
+                        "memory": old_memory["text"],
+                        "event": "UPDATE_WEIGHT",
+                        "old_weight": old_weight,
+                        "new_weight": new_weight,
+                        "reason": "PARAPHRASE: Same meaning, different expression",
+                    })
+
+                elif relationship == "CONTRADICT":
+                    # Set old fact weight to 0, insert new fact
+                    print(f"CONTRADICT - old_fact: {old_memory['text']}; new_fact: {fact_text}")
+                    current_memory_id = attr.get("memory_id") if attr else None
+                    self._update_memory_weight(old_fact_id, 0.0, old_payload, new_fact_id, current_memory_id)
+
+                    # Insert new fact
+                    mem_id = self._create_memory_with_attr(
+                        fact_text, embedding, fact_metadata
+                    )
+                    results.append({
+                        "id": mem_id,
+                        "memory": fact_text,
+                        "event": "ADD",
+                        "contradicted_memory_id": old_fact_id,
+                        "reason": "CONTRADICT: New fact contradicts old, old weight set to 0",
+                    })
+
+            processed_facts.add(fact_idx)
+
+        print(results)
         return {"results": results}
 
-    def _insert_new_facts(self, facts_with_embeddings, base_metadata, user_id):
+    def _insert_new_facts_with_attr(self, facts_with_embeddings, base_metadata, user_id):
         """Insert all facts as new memories when no related memories exist."""
         results = []
         for fact_data in facts_with_embeddings:
@@ -782,11 +842,17 @@ class Memory(MemoryBase):
 
     def _create_memory_with_attr(self, data, embeddings, metadata):
         """Create a memory with attribute metadata."""
-        memory_id = str(uuid.uuid4())
+        memory_id = metadata.get("memory_id") or str(uuid.uuid4())
         metadata = metadata or {}
         metadata["data"] = data
         metadata["hash"] = hashlib.md5(data.encode()).hexdigest()
         metadata["created_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+
+        # Initialize new fields
+        if "related_memory_id" not in metadata:
+            metadata["related_memory_id"] = [memory_id]
+        if "changetime" not in metadata:
+            metadata["changetime"] = metadata["created_at"]
 
         if "importance" not in metadata or metadata["importance"] not in ["high", "low"]:
             metadata["weight"] = 1.0
@@ -795,6 +861,7 @@ class Memory(MemoryBase):
         elif metadata["importance"] == "low":
             metadata["weight"] = 0.5
 
+        print(f"\ninsert: id: {memory_id}; payloads: {metadata}")
         self.vector_store.insert(
             vectors=[embeddings],
             ids=[memory_id],
@@ -809,12 +876,22 @@ class Memory(MemoryBase):
         )
         return memory_id
 
-    def _update_memory_weight(self, memory_id, new_weight, existing_payload):
+    def _update_memory_weight(self, memory_id, new_weight, existing_payload, change_source_fact_id=None, new_memory_id=None):
         """Update only the weight of an existing memory."""
         updated_metadata = deepcopy(existing_payload)
         updated_metadata["weight"] = new_weight
         updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
 
+        # Add changetime and changeto fields
+        updated_metadata["changetime"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+        if change_source_fact_id:
+            updated_metadata["changeto"] = change_source_fact_id
+
+        # Update related_memory_id if new_memory_id is provided
+        if new_memory_id:
+            updated_metadata["related_memory_id"] = self._update_related_memory_ids(existing_payload, new_memory_id)
+
+        print(f"update weight: id: {memory_id}; payloads: {updated_metadata}")
         self.vector_store.update(
             vector_id=memory_id,
             vector=None,  # Keep same embedding
@@ -822,12 +899,21 @@ class Memory(MemoryBase):
         )
         logger.info(f"Updated weight for memory {memory_id} to {new_weight}")
 
-    def _update_memory_embedding(self, memory_id, new_embedding, new_data, existing_payload):
+    def _update_memory_embedding(self, memory_id, new_embedding, new_data, existing_payload, change_source_fact_id=None, new_memory_id=None):
         """Update the embedding and data of an existing memory."""
         updated_metadata = deepcopy(existing_payload)
         updated_metadata["data"] = new_data
         updated_metadata["hash"] = hashlib.md5(new_data.encode()).hexdigest()
         updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+
+        # Add changetime and changeto fields
+        updated_metadata["changetime"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+        if change_source_fact_id:
+            updated_metadata["changeto"] = change_source_fact_id
+
+        # Update related_memory_id if new_memory_id is provided
+        if new_memory_id:
+            updated_metadata["related_memory_id"] = self._update_related_memory_ids(existing_payload, new_memory_id)
 
         self.vector_store.update(
             vector_id=memory_id,
@@ -835,6 +921,43 @@ class Memory(MemoryBase):
             payload=updated_metadata,
         )
         logger.info(f"Updated embedding for memory {memory_id}")
+
+    def _update_related_memory_ids(self, existing_payload, new_memory_id):
+        """Update related_memory_id list with new memory_id, ensuring uniqueness."""
+        related_ids = existing_payload.get("related_memory_id", [])
+        if not isinstance(related_ids, list):
+            related_ids = []
+
+        # Add new memory_id if not already present
+        if new_memory_id not in related_ids:
+            related_ids.append(new_memory_id)
+
+        return related_ids
+
+    def _update_memory_status(self, memory_id, new_status, existing_payload, change_source_fact_id=None, new_memory_id=None):
+        """Update the status of a todo memory and related fields."""
+        updated_metadata = deepcopy(existing_payload)
+
+        # Update status
+        updated_metadata["status"] = new_status
+
+        # Update related_memory_id if new_memory_id is provided
+        if new_memory_id:
+            updated_metadata["related_memory_id"] = self._update_related_memory_ids(existing_payload, new_memory_id)
+
+        # Add changetime and changeto fields
+        updated_metadata["changetime"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+        if change_source_fact_id:
+            updated_metadata["changeto"] = change_source_fact_id
+
+        updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+
+        self.vector_store.update(
+            vector_id=memory_id,
+            vector=None,  # Keep same embedding
+            payload=updated_metadata,
+        )
+        logger.info(f"Updated status for memory {memory_id} to {new_status}")
 
     def _add_to_vector_store(self, messages, metadata, filters, infer):
         if not infer:

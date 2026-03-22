@@ -427,75 +427,80 @@ Please note to return the IDs in the output from the input IDs only and do not g
         }
 """
 
-FACT_RELATIONSHIP_PROMPT = """You are a fact relationship classifier. Your task is to analyze relationships between new facts and existing facts in a memory system.
+FACT_RELATIONSHIP_PROMPT = """You are a fact relationship classifier. Your task is to analyze the relationship between a SINGLE new fact and multiple existing facts.
 
-You need to classify the relationship between each new fact and its most similar existing fact into one of five categories:
+Given:
+- ONE NEW FACT to be added to the memory system
+- MULTIPLE EXISTING FACTS (old facts) that are potentially related to the new fact
+
+For each existing fact, classify its relationship with the new fact into one of five categories:
 
 1. **IDENTICAL**: The facts express exactly the same information with no meaningful differences.
    - Example 1:
-     - Old Fact: "User likes pizza"
      - New Fact: "User likes pizza"
+     - Old Fact: "User likes pizza"
      - Relationship: IDENTICAL
    - Example 2:
-     - Old Fact: "Meeting scheduled for 3pm tomorrow"
      - New Fact: "Meeting scheduled for 3pm tomorrow"
+     - Old Fact: "Meeting scheduled for 3pm tomorrow"
      - Relationship: IDENTICAL
 
 2. **MORE_COMPLETE**: Both facts express the same core information, but the NEW fact contains additional relevant details or context that enhances the old fact.
    - Example 1:
-     - Old Fact: "User likes pizza"
      - New Fact: "User likes cheese pizza with pepperoni from Domino's"
+     - Old Fact: "User likes pizza"
      - Relationship: MORE_COMPLETE
    - Example 2:
-     - Old Fact: "John is a software engineer"
      - New Fact: "John is a senior software engineer at Google working on cloud infrastructure"
+     - Old Fact: "John is a software engineer"
      - Relationship: MORE_COMPLETE
 
 3. **LESS_COMPLETE**: Both facts express the same core information, but the OLD fact contains additional relevant details or context that the new fact lacks.
    - Example 1:
-     - Old Fact: "User likes cheese pizza with pepperoni from Domino's"
      - New Fact: "User likes pizza"
+     - Old Fact: "User likes cheese pizza with pepperoni from Domino's"
      - Relationship: LESS_COMPLETE
    - Example 2:
-     - Old Fact: "Sarah has a master's degree in Computer Science from MIT"
      - New Fact: "Sarah studied Computer Science"
+     - Old Fact: "Sarah has a master's degree in Computer Science from MIT"
      - Relationship: LESS_COMPLETE
 
 4. **PARAPHRASE**: The facts convey the same meaning using different words or phrasing, but neither is more complete than the other. They are semantically equivalent but lexically different.
    - Example 1:
-     - Old Fact: "User enjoys eating pizza"
      - New Fact: "User likes to eat pizza"
+     - Old Fact: "User enjoys eating pizza"
      - Relationship: PARAPHRASE
    - Example 2:
-     - Old Fact: "The meeting was postponed to Friday"
      - New Fact: "The meeting has been rescheduled for Friday"
+     - Old Fact: "The meeting was postponed to Friday"
      - Relationship: PARAPHRASE
    - Example 3:
-     - Old Fact: "User is a software developer"
      - New Fact: "User works as a programmer"
+     - Old Fact: "User is a software developer"
      - Relationship: PARAPHRASE
 
 5. **CONTRADICT**: The facts express opposing or conflicting information that cannot both be true simultaneously. This includes changes in state, opposite preferences, or mutually exclusive facts.
    - Example 1:
-     - Old Fact: "User likes pizza"
      - New Fact: "User hates pizza"
+     - Old Fact: "User likes pizza"
      - Relationship: CONTRADICT
    - Example 2:
-     - Old Fact: "Meeting is at 3pm"
      - New Fact: "Meeting is at 5pm"
+     - Old Fact: "Meeting is at 3pm"
      - Relationship: CONTRADICT (same meeting, different times)
    - Example 3:
-     - Old Fact: "User lives in New York"
      - New Fact: "User moved to California last week"
+     - Old Fact: "User lives in New York"
      - Relationship: CONTRADICT (current location changed)
 
 IMPORTANT GUIDELINES:
+- Analyze the NEW fact against EACH existing fact independently
 - Focus on SEMANTIC MEANING, not just word overlap or similarity
 - Consider whether additional details are MEANINGFUL and RELEVANT, not just additional words
 - Temporal updates (e.g., "User lives in X" vs "User moved to Y") should be CONTRADICT if they imply different current states
-- Two facts about completely different topics should not be compared (only compare if they are potentially related)
 - When in doubt, prefer MORE_COMPLETE or LESS_COMPLETE over PARAPHRASE if there's a clear information difference
 - Changes in preference (like → dislike), location, status, or time are typically CONTRADICT
+- Some facts may be UNRELATED - only classify relationships for facts that are potentially about the same topic
 
 OUTPUT FORMAT:
 You must return a JSON object with the following structure:
@@ -503,16 +508,15 @@ You must return a JSON object with the following structure:
 {
     "relationships": [
         {
-            "new_fact_index": <integer>,           # Index of the new fact in the input list (0-based)
-            "old_fact_id": "<string>",             # ID of the most similar old fact
-            "relationship": "IDENTICAL|MORE_COMPLETE|LESS_COMPLETE|PARAPHRASE|CONTRADICT",
-            "reason": "<string>"                   # Brief explanation of why this relationship was chosen
-        },
-        ...
+            "old_fact_id": "<string>",             # ID of the old fact
+            "relationship": "IDENTICAL|MORE_COMPLETE|LESS_COMPLETE|PARAPHRASE|CONTRADICT"
+        }
     ]
 }
 
-If a new fact has no related old facts (completely new information), do not include it in the relationships array.
+Only include relationships for old facts that are actually related to the new fact. If an old fact is about a completely different topic, exclude it from the results.
+
+Do not return anything except the JSON format.
 """
 
 PROCEDURAL_MEMORY_SYSTEM_PROMPT = """
@@ -595,37 +599,38 @@ You are a memory summarization system that records and preserves the complete in
 """
 
 
-def get_fact_relationship_messages(new_facts, old_memories):
+def get_fact_relationship_messages(new_fact, old_memories):
     """
     Generate messages for the fact relationship classification prompt.
 
-    This function prepares the input for classifying relationships between new facts
-    and existing memories. It batches all facts for efficiency.
+    This function prepares the input for classifying relationships between a single new fact
+    and multiple existing memories.
 
     Args:
-        new_facts: List of dictionaries with 'fact' and 'index' keys
-                  Example: [{"fact": "User likes pizza", "index": 0}, ...]
+        new_fact: Dictionary with 'fact' key
+                  Example: {"fact": "User likes pizza"}
         old_memories: List of dictionaries with 'id', 'text' keys
                      Example: [{"id": "uuid-1", "text": "User likes cheese pizza"}, ...]
 
     Returns:
         List of message dictionaries for the LLM with system prompt and user content
     """
-    # Format new facts
-    new_facts_str = "NEW FACTS TO ADD:\n"
-    for i, nf in enumerate(new_facts):
-        new_facts_str += f"[{i}] {nf['fact']}\n"
+    # Format new fact
+    new_fact_str = f"NEW FACT TO ADD:\n"
+    for nf in new_fact:
+        new_fact_str += f"[{nf['index']}] {nf['fact']}\n"
 
     # Format old memories
     old_memories_str = "EXISTING MEMORIES:\n"
     for om in old_memories:
         old_memories_str += f"ID: {om['id']} | Text: {om['text']}\n"
 
-    user_content = f"""{new_facts_str}
+    user_content = f"""{new_fact_str}
 
 {old_memories_str}
 
-For each new fact, identify the most similar existing memory and classify their relationship.
+Analyze the relationship between the NEW FACT and each EXISTING MEMORY.
+For each existing memory that is related to the new fact, classify their relationship.
 Return the result in the specified JSON format with the relationships array."""
 
     return [

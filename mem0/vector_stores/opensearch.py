@@ -37,6 +37,8 @@ class OpenSearchDB(VectorStoreBase):
             pool_maxsize=20,
         )
 
+        print("init opensearch success")
+
         self.collection_name = config.collection_name
         self.embedding_model_dims = config.embedding_model_dims
         self.create_col(self.collection_name, self.embedding_model_dims)
@@ -53,7 +55,7 @@ class OpenSearchDB(VectorStoreBase):
                     "vector_field": {
                         "type": "knn_vector",
                         "dimension": self.embedding_model_dims,
-                        "method": {"engine": "nmslib", "name": "hnsw", "space_type": "cosinesimil"},
+                        "method": {"engine": "lucene", "name": "hnsw", "space_type": "cosinesimil"},
                     },
                     "metadata": {"type": "object", "properties": {"user_id": {"type": "keyword"}}},
                 }
@@ -75,7 +77,7 @@ class OpenSearchDB(VectorStoreBase):
                     "vector_field": {
                         "type": "knn_vector",
                         "dimension": vector_size,
-                        "method": {"engine": "nmslib", "name": "hnsw", "space_type": "cosinesimil"},
+                        "method": {"engine": "lucene", "name": "hnsw", "space_type": "cosinesimil"},
                     },
                     "payload": {"type": "object"},
                     "id": {"type": "keyword"},
