@@ -210,32 +210,32 @@ class Memory(MemoryBase):
         else:
             self.graph = None
         # Create telemetry config manually to avoid deepcopy issues with thread locks
-        telemetry_config_dict = {}
-        if hasattr(self.config.vector_store.config, 'model_dump'):
-            # For pydantic models
-            telemetry_config_dict = self.config.vector_store.config.model_dump()
-        else:
-            # For other objects, manually copy common attributes
-            for attr in ['host', 'port', 'path', 'api_key', 'index_name', 'dimension', 'metric']:
-                if hasattr(self.config.vector_store.config, attr):
-                    telemetry_config_dict[attr] = getattr(self.config.vector_store.config, attr)
+        # telemetry_config_dict = {}
+        # if hasattr(self.config.vector_store.config, 'model_dump'):
+        #     # For pydantic models
+        #     telemetry_config_dict = self.config.vector_store.config.model_dump()
+        # else:
+        #     # For other objects, manually copy common attributes
+        #     for attr in ['host', 'port', 'path', 'api_key', 'index_name', 'dimension', 'metric']:
+        #         if hasattr(self.config.vector_store.config, attr):
+        #             telemetry_config_dict[attr] = getattr(self.config.vector_store.config, attr)
 
-        # Override collection name for telemetry
-        telemetry_config_dict['collection_name'] = "mem0migrations"
+        # # Override collection name for telemetry
+        # telemetry_config_dict['collection_name'] = "mem0migrations"
 
-        # Set path for file-based vector stores
-        telemetry_config = _safe_deepcopy_config(self.config.vector_store.config)
-        if self.config.vector_store.provider in ["faiss", "qdrant"]:
-            provider_path = f"migrations_{self.config.vector_store.provider}"
-            telemetry_config_dict['path'] = os.path.join(mem0_dir, provider_path)
-            os.makedirs(telemetry_config_dict['path'], exist_ok=True)
+        # # Set path for file-based vector stores
+        # telemetry_config = _safe_deepcopy_config(self.config.vector_store.config)
+        # if self.config.vector_store.provider in ["faiss", "qdrant"]:
+        #     provider_path = f"migrations_{self.config.vector_store.provider}"
+        #     telemetry_config_dict['path'] = os.path.join(mem0_dir, provider_path)
+        #     os.makedirs(telemetry_config_dict['path'], exist_ok=True)
 
-        # Create the config object using the same class as the original
-        telemetry_config = self.config.vector_store.config.__class__(**telemetry_config_dict)
-        self._telemetry_vector_store = VectorStoreFactory.create(
-            self.config.vector_store.provider, telemetry_config
-        )
-        capture_event("mem0.init", self, {"sync_type": "sync"})
+        # # Create the config object using the same class as the original
+        # telemetry_config = self.config.vector_store.config.__class__(**telemetry_config_dict)
+        # self._telemetry_vector_store = VectorStoreFactory.create(
+        #     self.config.vector_store.provider, telemetry_config
+        # )
+        # capture_event("mem0.init", self, {"sync_type": "sync"})
 
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any]):
@@ -1275,10 +1275,10 @@ class Memory(MemoryBase):
         if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
             raise ValueError("At least one of 'user_id', 'agent_id', or 'run_id' must be specified.")
 
-        keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"}
-        )
+        # keys, encoded_ids = process_telemetry_filters(effective_filters)
+        # capture_event(
+        #     "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"}
+        # )
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_memories = executor.submit(self._get_all_from_vector_store, effective_filters, limit)
@@ -1862,15 +1862,15 @@ class AsyncMemory(MemoryBase):
         else:
             self.graph = None
 
-        telemetry_config = _safe_deepcopy_config(self.config.vector_store.config)
-        telemetry_config.collection_name = "mem0migrations"
-        if self.config.vector_store.provider in ["faiss", "qdrant"]:
-            provider_path = f"migrations_{self.config.vector_store.provider}"
-            telemetry_config.path = os.path.join(mem0_dir, provider_path)
-            os.makedirs(telemetry_config.path, exist_ok=True)
-        self._telemetry_vector_store = VectorStoreFactory.create(self.config.vector_store.provider, telemetry_config)
+        # telemetry_config = _safe_deepcopy_config(self.config.vector_store.config)
+        # telemetry_config.collection_name = "mem0migrations"
+        # if self.config.vector_store.provider in ["faiss", "qdrant"]:
+        #     provider_path = f"migrations_{self.config.vector_store.provider}"
+        #     telemetry_config.path = os.path.join(mem0_dir, provider_path)
+        #     os.makedirs(telemetry_config.path, exist_ok=True)
+        # self._telemetry_vector_store = VectorStoreFactory.create(self.config.vector_store.provider, telemetry_config)
 
-        capture_event("mem0.init", self, {"sync_type": "async"})
+        # capture_event("mem0.init", self, {"sync_type": "async"})
 
     @classmethod
     async def from_config(cls, config_dict: Dict[str, Any]):
