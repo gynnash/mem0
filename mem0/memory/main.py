@@ -842,15 +842,18 @@ class Memory(MemoryBase):
 
     def _create_memory_with_attr(self, data, embeddings, metadata):
         """Create a memory with attribute metadata."""
-        memory_id = metadata.get("memory_id") or str(uuid.uuid4())
+        memory_id = str(uuid.uuid4())
         metadata = metadata or {}
+        upper_memory_id = metadata.get("memory_id", memory_id)
         metadata["data"] = data
         metadata["hash"] = hashlib.md5(data.encode()).hexdigest()
         metadata["created_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
 
         # Initialize new fields
         if "related_memory_id" not in metadata:
-            metadata["related_memory_id"] = [memory_id]
+            metadata["related_memory_id"] = [upper_memory_id]
+        elif upper_memory_id not in metadata["related_memory_id"]:
+            metadata["related_memory_id"].append(upper_memory_id)
         if "changetime" not in metadata:
             metadata["changetime"] = metadata["created_at"]
 
