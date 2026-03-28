@@ -159,10 +159,16 @@ class OpenSearchDB(VectorStoreBase):
         # Prepare filter conditions if applicable
         filter_clauses = []
         if filters:
+            # Handle standard filter keys
             for key in ["user_id", "run_id", "agent_id"]:
                 value = filters.get(key)
                 if value:
                     filter_clauses.append({"term": {f"payload.{key}.keyword": value}})
+
+            # Handle memory_type filter (stored in payload)
+            memory_type = filters.get("memory_type")
+            if memory_type:
+                filter_clauses.append({"term": {f"payload.memory_type.keyword": memory_type}})
 
         # Combine knn with filters if needed
         if filter_clauses:

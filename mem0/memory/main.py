@@ -510,13 +510,25 @@ class Memory(MemoryBase):
             fact_text = fact_data["fact"]
             embedding = fact_data["embedding"]
             fact_idx = fact_data["index"]
+            fact_attr = fact_data["attr"]  # Get the attributes for this fact
 
-            # Search for similar memories for this specific fact
+            # Create search filters specific to this fact
+            fact_search_filters = search_filters.copy()
+
+            # Add memory_type filter if it exists in the fact's attributes
+            if "memory_type" in fact_attr:
+                fact_search_filters["memory_type"] = fact_attr["memory_type"]
+                logger.info(f"Searching for existing memories with memory_type: {fact_attr['memory_type']}")
+
+            # Debug log the filters being used
+            logger.debug(f"Search filters for fact '{fact_text[:50]}...': {fact_search_filters}")
+
+            # Search for similar memories for this specific fact with memory_type filter
             existing_memories = self.vector_store.search(
                 query=fact_text,
                 vectors=embedding,
                 limit=5,
-                filters=search_filters,
+                filters=fact_search_filters,
             )
 
             # If no related memories found, this fact will be added as new
@@ -887,7 +899,7 @@ class Memory(MemoryBase):
 
         # Add changetime and changeto fields
         updated_metadata["changetime"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
-        if change_source_fact_id:
+        if change_source_fact_id and updated_metadata["fact_id"] != change_source_fact_id:
             updated_metadata["changeto"] = change_source_fact_id
 
         # Update related_memory_id if new_memory_id is provided
@@ -1546,7 +1558,10 @@ class Memory(MemoryBase):
 
     def _search_vector_store(self, query, filters, limit, threshold: Optional[float] = None):
         embeddings = self.embedding_model.embed(query, "search")
-        memories = self.vector_store.search(query=query, vectors=embeddings, limit=limit, filters=filters)
+
+        # If threshold is specified, request more results to ensure we get enough after filtering
+        search_limit = limit * 3 if threshold is not None else limit
+        memories = self.vector_store.search(query=query, vectors=embeddings, limit=search_limit, filters=filters)
 
         promoted_payload_keys = [
             "user_id",
@@ -1559,7 +1574,14 @@ class Memory(MemoryBase):
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", *promoted_payload_keys}
 
         original_memories = []
+        filtered_count = 0
+
         for mem in memories:
+            # Apply threshold filter first
+            if threshold is not None and mem.score < threshold:
+                filtered_count += 1
+                continue
+
             memory_item_dict = MemoryItem(
                 id=mem.id,
                 memory=mem.payload.get("data", ""),
@@ -1577,8 +1599,14 @@ class Memory(MemoryBase):
             if additional_metadata:
                 memory_item_dict["metadata"] = additional_metadata
 
-            if threshold is None or mem.score >= threshold:
-                original_memories.append(memory_item_dict)
+            original_memories.append(memory_item_dict)
+
+            # Stop once we have enough results
+            if len(original_memories) >= limit:
+                break
+
+        if threshold is not None:
+            logger.info(f"Search with threshold {threshold}: found {len(memories)} candidates, filtered {filtered_count}, returned {len(original_memories)}")
 
         return original_memories
 
@@ -2647,8 +2675,11 @@ class AsyncMemory(MemoryBase):
 
     async def _search_vector_store(self, query, filters, limit, threshold: Optional[float] = None):
         embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+
+        # If threshold is specified, request more results to ensure we get enough after filtering
+        search_limit = limit * 3 if threshold is not None else limit
         memories = await asyncio.to_thread(
-            self.vector_store.search, query=query, vectors=embeddings, limit=limit, filters=filters
+            self.vector_store.search, query=query, vectors=embeddings, limit=search_limit, filters=filters
         )
 
         promoted_payload_keys = [
@@ -2663,6 +2694,10 @@ class AsyncMemory(MemoryBase):
 
         original_memories = []
         for mem in memories:
+            # Apply threshold filter first
+            if threshold is not None and mem.score < threshold:
+                continue
+
             memory_item_dict = MemoryItem(
                 id=mem.id,
                 memory=mem.payload.get("data", ""),
@@ -2680,8 +2715,14 @@ class AsyncMemory(MemoryBase):
             if additional_metadata:
                 memory_item_dict["metadata"] = additional_metadata
 
-            if threshold is None or mem.score >= threshold:
-                original_memories.append(memory_item_dict)
+            original_memories.append(memory_item_dict)
+
+            # Stop once we have enough results
+            if len(original_memories) >= limit:
+                break
+
+        if threshold is not None:
+            logger.info(f"Async search with threshold {threshold}: returned {len(original_memories)} results")
 
         return original_memories
 
