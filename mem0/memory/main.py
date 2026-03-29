@@ -527,7 +527,7 @@ class Memory(MemoryBase):
             existing_memories = self.vector_store.search(
                 query=fact_text,
                 vectors=embedding,
-                limit=5,
+                limit=10,
                 filters=fact_search_filters,
             )
 
@@ -538,15 +538,22 @@ class Memory(MemoryBase):
             # Collect related old memories for this fact
             old_memories_for_fact = []
             for mem in existing_memories:
-                mem_id = mem.id
+                if mem.score <= 0.5:
+                    logger.info(f"Skipping memory with score {mem.score} for fact {fact_text[:50]}...")
+                    continue
+                mem_id = mem.id  # This is the internal mem.id for vector operations
+
+                # Use attr.fact_id from the payload for consistency
+                attr_fact_id = mem.payload.get("fact_id", mem_id)
+
                 old_memories_for_fact.append({
-                    "id": mem_id,
+                    "fact_id": attr_fact_id,  # Use fact_id for consistency with relationships
                     "text": mem.payload.get("data", ""),
                 })
-                # Store in global map for later processing
-                if mem_id not in all_old_memories:
-                    all_old_memories[mem_id] = {
-                        "id": mem_id,
+                # Store in global map using fact_id as key for efficient lookup
+                if attr_fact_id not in all_old_memories:
+                    all_old_memories[attr_fact_id] = {
+                        "mem_id": mem_id,  # Keep mem.id for vector operations
                         "text": mem.payload.get("data", ""),
                         "payload": mem.payload,
                     }
@@ -674,7 +681,7 @@ class Memory(MemoryBase):
                 fact_metadata.update(attr)
 
             # Get the new fact's ID from attr
-            new_fact_id = attr.get("id", "") if attr else ""
+            new_fact_id = attr.get("fact_id", "") if attr else ""
 
             # Get relationships for this fact
             relationships = relationship_results.get(fact_idx, [])
@@ -703,6 +710,7 @@ class Memory(MemoryBase):
 
                 old_memory = all_old_memories[old_fact_id]
                 old_payload = old_memory["payload"]
+                old_memory_id = old_memory["mem_id"]  # Get the mem.id for vector operations
 
                 # Check if both are todos and handle status changes
                 old_memory_type = old_payload.get("memory_type")
@@ -722,13 +730,13 @@ class Memory(MemoryBase):
 
                     # Update old memory with new status
                     self._update_memory_status(
-                        old_fact_id, new_status, old_payload,
+                        old_memory_id, new_status, old_payload,
                         change_source_fact_id=new_fact_id,
                         new_memory_id=current_memory_id
                     )
 
                     results.append({
-                        "id": old_fact_id,
+                        "id": old_fact_id,  # Return fact_id in results for consistency
                         "memory": old_memory["text"],
                         "event": "UPDATE_STATUS",
                         "old_status": old_status,
@@ -745,11 +753,11 @@ class Memory(MemoryBase):
                     new_weight = old_weight + 0.2
 
                     # Get current fact's memory_id from attr if available
-                    current_memory_id = attr.get("memory_id") if attr else None
+                    business_memory_id = attr.get("memory_id") if attr else None
 
-                    self._update_memory_weight(old_fact_id, new_weight, old_payload, new_fact_id, current_memory_id)
+                    self._update_memory_weight(old_memory_id, new_weight, old_payload, None, business_memory_id)
                     results.append({
-                        "id": old_fact_id,
+                        "id": old_fact_id,  # Return fact_id in results for consistency
                         "memory": old_memory["text"],
                         "event": "UPDATE_WEIGHT",
                         "old_weight": old_weight,
@@ -760,10 +768,9 @@ class Memory(MemoryBase):
                 elif relationship == "MORE_COMPLETE":
                     # Update old fact's embedding with new fact's embedding
                     print(f"MORE_COMPLETE - old_fact: {old_memory['text']}; new_fact: {fact_text}")
-                    current_memory_id = attr.get("memory_id") if attr else None
-                    self._update_memory_embedding(old_fact_id, embedding, fact_text, old_payload, new_fact_id, current_memory_id)
+                    self._update_memory_embedding(old_memory_id, embedding, fact_text, attr)
                     results.append({
-                        "id": old_fact_id,
+                        "id": old_fact_id,  # Return fact_id in results for consistency
                         "memory": fact_text,
                         "event": "UPDATE_EMBEDDING",
                         "reason": "MORE_COMPLETE: New fact has more information",
@@ -775,10 +782,10 @@ class Memory(MemoryBase):
                     old_weight = old_payload.get("weight", 1.0)
                     new_weight = old_weight + 0.1
 
-                    current_memory_id = attr.get("memory_id") if attr else None
-                    self._update_memory_weight(old_fact_id, new_weight, old_payload, new_fact_id, current_memory_id)
+                    business_memory_id = attr.get("memory_id") if attr else None
+                    self._update_memory_weight(old_memory_id, new_weight, old_payload, None, business_memory_id)
                     results.append({
-                        "id": old_fact_id,
+                        "id": old_fact_id,  # Return fact_id in results for consistency
                         "memory": old_memory["text"],
                         "event": "UPDATE_WEIGHT",
                         "old_weight": old_weight,
@@ -792,10 +799,10 @@ class Memory(MemoryBase):
                     old_weight = old_payload.get("weight", 1.0)
                     new_weight = old_weight + 0.2
 
-                    current_memory_id = attr.get("memory_id") if attr else None
-                    self._update_memory_weight(old_fact_id, new_weight, old_payload, new_fact_id, current_memory_id)
+                    business_memory_id = attr.get("memory_id") if attr else None
+                    self._update_memory_weight(old_memory_id, new_weight, old_payload, None, business_memory_id)
                     results.append({
-                        "id": old_fact_id,
+                        "id": old_fact_id,  # Return fact_id in results for consistency
                         "memory": old_memory["text"],
                         "event": "UPDATE_WEIGHT",
                         "old_weight": old_weight,
@@ -807,7 +814,7 @@ class Memory(MemoryBase):
                     # Set old fact weight to 0, insert new fact
                     print(f"CONTRADICT - old_fact: {old_memory['text']}; new_fact: {fact_text}")
                     current_memory_id = attr.get("memory_id") if attr else None
-                    self._update_memory_weight(old_fact_id, 0.0, old_payload, new_fact_id, current_memory_id)
+                    self._update_memory_weight(old_memory_id, 0.0, old_payload, new_fact_id, current_memory_id)
 
                     # Insert new fact
                     mem_id = self._create_memory_with_attr(
@@ -817,7 +824,7 @@ class Memory(MemoryBase):
                         "id": mem_id,
                         "memory": fact_text,
                         "event": "ADD",
-                        "contradicted_memory_id": old_fact_id,
+                        "contradicted_fact_id": old_fact_id,  # Use fact_id for consistency
                         "reason": "CONTRADICT: New fact contradicts old, old weight set to 0",
                     })
 
@@ -853,22 +860,39 @@ class Memory(MemoryBase):
         return {"results": results}
 
     def _create_memory_with_attr(self, data, embeddings, metadata):
-        """Create a memory with attribute metadata."""
+        """Create a memory with attribute metadata.
+
+        Handles three types of IDs:
+        1. mem.id - Internal UUID generated by mem0
+        2. attr.fact_id - Fact-specific ID that should match mem.id for new memories
+        3. attr.memory_id - Business-level memory ID that can group multiple facts
+        """
+        # Generate internal memory ID for vector storage
         memory_id = str(uuid.uuid4())
         metadata = metadata or {}
-        upper_memory_id = metadata.get("memory_id", memory_id)
+
+        # Keep the original fact_id and memory_id from metadata if they exist
+        # These are business-level IDs and should not be modified
+        business_memory_id = metadata.get("memory_id")
+        # fact_id is kept as-is in metadata, no need to extract it separately
+
+        # Set the data and basic metadata
         metadata["data"] = data
         metadata["hash"] = hashlib.md5(data.encode()).hexdigest()
         metadata["created_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
 
-        # Initialize new fields
-        if "related_memory_id" not in metadata:
-            metadata["related_memory_id"] = [upper_memory_id]
-        elif upper_memory_id not in metadata["related_memory_id"]:
-            metadata["related_memory_id"].append(upper_memory_id)
+        # Initialize related_memory_id tracking with business memory_id if provided
+        if business_memory_id:
+            if "related_memory_id" not in metadata:
+                metadata["related_memory_id"] = [business_memory_id]
+            elif business_memory_id not in metadata["related_memory_id"]:
+                metadata["related_memory_id"].append(business_memory_id)
+
+        # Set changetime
         if "changetime" not in metadata:
             metadata["changetime"] = metadata["created_at"]
 
+        # Set weight based on importance
         if "importance" not in metadata or metadata["importance"] not in ["high", "low"]:
             metadata["weight"] = 1.0
         elif metadata["importance"] == "high":
@@ -876,7 +900,7 @@ class Memory(MemoryBase):
         elif metadata["importance"] == "low":
             metadata["weight"] = 0.5
 
-        print(f"\ninsert: id: {memory_id}; payloads: {metadata}")
+        print(f"\ninsert: mem.id: {memory_id}; attr.fact_id: {metadata.get('fact_id')}; attr.memory_id: {metadata.get('memory_id')}; payloads: {metadata}")
         self.vector_store.insert(
             vectors=[embeddings],
             ids=[memory_id],
@@ -891,20 +915,29 @@ class Memory(MemoryBase):
         )
         return memory_id
 
-    def _update_memory_weight(self, memory_id, new_weight, existing_payload, change_source_fact_id=None, new_memory_id=None):
-        """Update only the weight of an existing memory."""
+    def _update_memory_weight(self, memory_id, new_weight, existing_payload, new_fact_id=None, new_business_memory_id=None):
+        """Update only the weight of an existing memory.
+        
+        Args:
+            memory_id (str): The mem0 ID of the memory to update.
+            new_weight (float): The new weight to set.
+            existing_payload (dict): The existing payload of the memory.
+            new_fact_id (str, optional): The new fact ID to set. Defaults to None. For changeto field.
+            new_business_memory_id (str, optional): The new business memory ID(user provided memory_id) to set.
+                                                    Defaults to None. For related_memory_id field.
+        """
         updated_metadata = deepcopy(existing_payload)
         updated_metadata["weight"] = new_weight
         updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
 
         # Add changetime and changeto fields
         updated_metadata["changetime"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
-        if change_source_fact_id and updated_metadata["fact_id"] != change_source_fact_id:
-            updated_metadata["changeto"] = change_source_fact_id
+        if new_fact_id and updated_metadata["fact_id"] != new_fact_id:
+            updated_metadata["changeto"] = new_fact_id
 
-        # Update related_memory_id if new_memory_id is provided
-        if new_memory_id:
-            updated_metadata["related_memory_id"] = self._update_related_memory_ids(existing_payload, new_memory_id)
+        # Update related_memory_id if new_business_memory_id is provided
+        if new_business_memory_id:
+            updated_metadata["related_memory_id"] = self._update_related_memory_ids(existing_payload, new_business_memory_id)
 
         print(f"update weight: id: {memory_id}; payloads: {updated_metadata}")
         self.vector_store.update(
@@ -914,21 +947,25 @@ class Memory(MemoryBase):
         )
         logger.info(f"Updated weight for memory {memory_id} to {new_weight}")
 
-    def _update_memory_embedding(self, memory_id, new_embedding, new_data, existing_payload, change_source_fact_id=None, new_memory_id=None):
-        """Update the embedding and data of an existing memory."""
-        updated_metadata = deepcopy(existing_payload)
+    def _update_memory_embedding(self, memory_id, new_embedding, new_data, new_payload):
+        """Update the embedding and data of an existing memory.
+
+            All metadata fields are updated.
+            Only internal mem_id is reserved.
+        """
+        updated_metadata = deepcopy(new_payload)
         updated_metadata["data"] = new_data
         updated_metadata["hash"] = hashlib.md5(new_data.encode()).hexdigest()
         updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
 
         # Add changetime and changeto fields
         updated_metadata["changetime"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
-        if change_source_fact_id:
-            updated_metadata["changeto"] = change_source_fact_id
 
-        # Update related_memory_id if new_memory_id is provided
-        if new_memory_id:
-            updated_metadata["related_memory_id"] = self._update_related_memory_ids(existing_payload, new_memory_id)
+        if "memory_id" in new_payload:
+            if "related_memory_id" not in updated_metadata:
+                updated_metadata["related_memory_id"] = [new_payload["memory_id"]]
+            elif new_payload["memory_id"] not in updated_metadata["related_memory_id"]:
+                updated_metadata["related_memory_id"].append(new_payload["memory_id"])
 
         self.vector_store.update(
             vector_id=memory_id,
@@ -1419,20 +1456,20 @@ class Memory(MemoryBase):
             # Simple filters, merge directly
             effective_filters.update(filters)
 
-        keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
-                "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "sync",
-                "threshold": threshold,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-            },
-        )
+        # keys, encoded_ids = process_telemetry_filters(effective_filters)
+        # capture_event(
+        #     "mem0.search",
+        #     self,
+        #     {
+        #         "limit": limit,
+        #         "version": self.api_version,
+        #         "keys": keys,
+        #         "encoded_ids": encoded_ids,
+        #         "sync_type": "sync",
+        #         "threshold": threshold,
+        #         "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+        #     },
+        # )
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future_memories = executor.submit(self._search_vector_store, query, effective_filters, limit, threshold)

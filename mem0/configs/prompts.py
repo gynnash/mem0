@@ -500,7 +500,7 @@ IMPORTANT GUIDELINES:
 - Temporal updates (e.g., "User lives in X" vs "User moved to Y") should be CONTRADICT if they imply different current states
 - When in doubt, prefer MORE_COMPLETE or LESS_COMPLETE over PARAPHRASE if there's a clear information difference
 - Changes in preference (like → dislike), location, status, or time are typically CONTRADICT
-- Some facts may be UNRELATED - only classify relationships for facts that are potentially about the same topic
+- Some facts may be UNRELATED - only classify relationships for facts that are potentially related to the new fact
 
 OUTPUT FORMAT:
 You must return a JSON object with the following structure:
@@ -623,7 +623,7 @@ def get_fact_relationship_messages(new_fact, old_memories):
     # Format old memories
     old_memories_str = "EXISTING MEMORIES:\n"
     for om in old_memories:
-        old_memories_str += f"ID: {om['id']} | Text: {om['text']}\n"
+        old_memories_str += f"fact_id: {om['fact_id']} | Text: {om['text']}\n"
 
     user_content = f"""{new_fact_str}
 
