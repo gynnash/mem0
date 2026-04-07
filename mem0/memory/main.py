@@ -4,7 +4,6 @@ import gc
 import hashlib
 import json
 import logging
-import os
 import uuid
 import warnings
 from collections import defaultdict
@@ -13,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 import pytz
-from pydantic import ValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 from mem0.configs.base import MemoryConfig, MemoryItem
 from mem0.configs.enums import MemoryType
@@ -22,6 +21,7 @@ from mem0.configs.prompts import (
     get_fact_relationship_messages,
     get_update_memory_messages,
 )
+from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
 from mem0.memory.fact_pipeline import (
     ADD_WITH_ATTR_SIMILARITY_THRESHOLD,
@@ -35,7 +35,7 @@ from mem0.memory.fact_pipeline import (
     update_memory_status,
     update_memory_weight,
 )
-from mem0.memory.setup import mem0_dir, setup_config
+from mem0.memory.setup import setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import capture_event
 from mem0.memory.utils import (
@@ -46,7 +46,6 @@ from mem0.memory.utils import (
     parse_vision_messages,
     process_telemetry_filters,
     remove_code_blocks,
-    safe_deepcopy_config,
     is_multi_speaker_format,
 )
 from mem0.utils.factory import (
@@ -137,7 +136,7 @@ class Memory(MemoryBase):
         try:
             config = cls._process_config(config_dict)
             config = MemoryConfig(**config_dict)
-        except ValidationError as e:
+        except PydanticValidationError as e:
             logger.error(f"Configuration validation error: {e}")
             raise
         return cls(config)
@@ -153,7 +152,7 @@ class Memory(MemoryBase):
                 ]
         try:
             return config_dict
-        except ValidationError as e:
+        except PydanticValidationError as e:
             logger.error(f"Configuration validation error: {e}")
             raise
 
@@ -1787,7 +1786,7 @@ class AsyncMemory(MemoryBase):
         try:
             config = cls._process_config(config_dict)
             config = MemoryConfig(**config_dict)
-        except ValidationError as e:
+        except PydanticValidationError as e:
             logger.error(f"Configuration validation error: {e}")
             raise
         return cls(config)
@@ -1803,7 +1802,7 @@ class AsyncMemory(MemoryBase):
                 ]
         try:
             return config_dict
-        except ValidationError as e:
+        except PydanticValidationError as e:
             logger.error(f"Configuration validation error: {e}")
             raise
 
