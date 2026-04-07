@@ -168,7 +168,7 @@ class OpenSearchDB(VectorStoreBase):
             # Handle memory_type filter (stored in payload)
             memory_type = filters.get("memory_type")
             if memory_type:
-                filter_clauses.append({"term": {f"payload.memory_type.keyword": memory_type}})
+                filter_clauses.append({"term": {"payload.memory_type.keyword": memory_type}})
 
         # Combine knn with filters if needed
         if filter_clauses:
