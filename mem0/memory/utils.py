@@ -1,5 +1,8 @@
 import hashlib
+import logging
 import re
+from copy import deepcopy
+from typing import Any, Dict, Optional
 
 from mem0.configs.prompts import (
     FACT_RETRIEVAL_PROMPT,
@@ -7,6 +10,9 @@ from mem0.configs.prompts import (
     AGENT_MEMORY_EXTRACTION_PROMPT,
     SESSION_MEMORY_EXTRACTION_PROMPT,
 )
+from mem0.exceptions import ValidationError as Mem0ValidationError
+
+logger = logging.getLogger(__name__)
 
 
 def get_fact_retrieval_messages(message, is_agent_memory=False, is_multi_speaker_memory=False):
@@ -242,3 +248,84 @@ def sanitize_relationship_for_cypher(relationship) -> str:
 
     return re.sub(r"_+", "_", sanitized).strip("_")
 
+
+def safe_deepcopy_config(config):
+    """Safely deepcopy config, falling back to JSON serialization for non-serializable objects."""
+    try:
+        return deepcopy(config)
+    except Exception as e:
+        logger.debug(f"Deepcopy failed, using JSON serialization: {e}")
+
+        config_class = type(config)
+
+        if hasattr(config, "model_dump"):
+            try:
+                clone_dict = config.model_dump(mode="json")
+            except Exception:
+                clone_dict = {k: v for k, v in config.__dict__.items()}
+        elif hasattr(config, "__dataclass_fields__"):
+            from dataclasses import asdict
+            clone_dict = asdict(config)
+        else:
+            clone_dict = {k: v for k, v in config.__dict__.items()}
+
+        sensitive_tokens = ("auth", "credential", "password", "token", "secret", "key", "connection_class")
+        for field_name in list(clone_dict.keys()):
+            if any(token in field_name.lower() for token in sensitive_tokens):
+                clone_dict[field_name] = None
+
+        try:
+            return config_class(**clone_dict)
+        except Exception as reconstruction_error:
+            logger.warning(
+                f"Failed to reconstruct config: {reconstruction_error}. "
+                f"Telemetry may be affected."
+            )
+            raise
+
+
+def build_filters_and_metadata(
+    *,  # Enforce keyword-only arguments
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    actor_id: Optional[str] = None,  # For query-time filtering
+    input_metadata: Optional[Dict[str, Any]] = None,
+    input_filters: Optional[Dict[str, Any]] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Constructs metadata for storage and filters for querying based on session and actor identifiers.
+    """
+    base_metadata_template = deepcopy(input_metadata) if input_metadata else {}
+    effective_query_filters = deepcopy(input_filters) if input_filters else {}
+
+    session_ids_provided = []
+
+    if user_id:
+        base_metadata_template["user_id"] = user_id
+        effective_query_filters["user_id"] = user_id
+        session_ids_provided.append("user_id")
+
+    if agent_id:
+        base_metadata_template["agent_id"] = agent_id
+        effective_query_filters["agent_id"] = agent_id
+        session_ids_provided.append("agent_id")
+
+    if run_id:
+        base_metadata_template["run_id"] = run_id
+        effective_query_filters["run_id"] = run_id
+        session_ids_provided.append("run_id")
+
+    if not session_ids_provided:
+        raise Mem0ValidationError(
+            message="At least one of user_id, agent_id, or run_id must be provided.",
+            error_code="VALIDATION_001",
+            details={"user_id": user_id, "agent_id": agent_id, "run_id": run_id},
+            suggestion="Provide at least one session identifier for proper scoping."
+        )
+
+    resolved_actor_id = actor_id or effective_query_filters.get("actor_id")
+    if resolved_actor_id:
+        effective_query_filters["actor_id"] = resolved_actor_id
+
+    return base_metadata_template, effective_query_filters

@@ -1,0 +1,50 @@
+import uuid
+from copy import deepcopy
+
+
+def normalize_related_memories(values, business_memory_id=None):
+    related_memories = []
+    if values is not None:
+        if isinstance(values, list):
+            related_memories.extend(values)
+        else:
+            related_memories.append(values)
+    if business_memory_id:
+        related_memories.append(business_memory_id)
+
+    deduped_related_memories = []
+    seen = set()
+    for related_memory in related_memories:
+        if related_memory in (None, ""):
+            continue
+        dedupe_key = str(related_memory)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        deduped_related_memories.append(related_memory)
+
+    return deduped_related_memories
+
+
+def normalize_fact_metadata(metadata):
+    metadata = deepcopy(metadata or {})
+    metadata.setdefault("fact_id", str(uuid.uuid4()))
+    metadata["related_memories"] = normalize_related_memories(
+        metadata.get("related_memories"),
+        metadata.get("memory_id"),
+    )
+    return metadata
+
+
+def build_add_with_attr_result(memory_id, memory_text, metadata, event, reason=None, **extra_fields):
+    result = {
+        "id": memory_id,
+        "fact_id": metadata.get("fact_id"),
+        "memory_id": metadata.get("memory_id"),
+        "memory": memory_text,
+        "event": event,
+    }
+    if reason:
+        result["reason"] = reason
+    result.update(extra_fields)
+    return result

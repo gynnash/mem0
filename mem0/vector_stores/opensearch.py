@@ -37,7 +37,7 @@ class OpenSearchDB(VectorStoreBase):
             pool_maxsize=20,
         )
 
-        print("init opensearch success")
+        logger.info("Initialized OpenSearch vector store for collection %s", config.collection_name)
 
         self.collection_name = config.collection_name
         self.embedding_model_dims = config.embedding_model_dims
@@ -160,7 +160,7 @@ class OpenSearchDB(VectorStoreBase):
         filter_clauses = []
         if filters:
             # Handle standard filter keys
-            for key in ["user_id", "run_id", "agent_id"]:
+            for key in ["user_id", "run_id", "agent_id", "memory_id", "fact_id"]:
                 value = filters.get(key)
                 if value:
                     filter_clauses.append({"term": {f"payload.{key}.keyword": value}})
@@ -268,7 +268,7 @@ class OpenSearchDB(VectorStoreBase):
 
             filter_clauses = []
             if filters:
-                for key in ["user_id", "run_id", "agent_id"]:
+                for key in ["user_id", "run_id", "agent_id", "memory_id", "fact_id", "memory_type"]:
                     value = filters.get(key)
                     if value:
                         filter_clauses.append({"term": {f"payload.{key}.keyword": value}})
