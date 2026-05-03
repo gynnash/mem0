@@ -160,7 +160,7 @@ class OpenSearchDB(VectorStoreBase):
         filter_clauses = []
         if filters:
             # Handle standard filter keys
-            for key in ["user_id", "run_id", "agent_id", "memory_id", "fact_id"]:
+            for key in ["user_id", "run_id", "agent_id", "memory_id", "fact_id", "speaker_ids", "owner_speaker_id"]:
                 value = filters.get(key)
                 if value:
                     filter_clauses.append({"term": {f"payload.{key}.keyword": value}})
@@ -268,7 +268,7 @@ class OpenSearchDB(VectorStoreBase):
 
             filter_clauses = []
             if filters:
-                for key in ["user_id", "run_id", "agent_id", "memory_id", "fact_id", "memory_type"]:
+                for key in ["user_id", "run_id", "agent_id", "memory_id", "fact_id", "memory_type", "speaker_ids", "owner_speaker_id"]:
                     value = filters.get(key)
                     if value:
                         filter_clauses.append({"term": {f"payload.{key}.keyword": value}})
