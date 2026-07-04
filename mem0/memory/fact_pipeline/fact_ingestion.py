@@ -29,6 +29,8 @@ def normalize_related_memories(values, business_memory_id=None):
 def normalize_fact_metadata(metadata):
     metadata = deepcopy(metadata or {})
     metadata.setdefault("fact_id", str(uuid.uuid4()))
+    if not metadata.get("latest_memory_id"):
+        metadata["latest_memory_id"] = metadata.get("memory_id")
     metadata["related_memories"] = normalize_related_memories(
         metadata.get("related_memories"),
         metadata.get("memory_id"),
@@ -41,6 +43,9 @@ def build_add_with_attr_result(memory_id, memory_text, metadata, event, reason=N
         "id": memory_id,
         "fact_id": metadata.get("fact_id"),
         "memory_id": metadata.get("memory_id"),
+        "latest_memory_id": metadata.get("latest_memory_id"),
+        "memory_type": metadata.get("memory_type"),
+        "persisted_at": metadata.get("persisted_at"),
         "memory": memory_text,
         "event": event,
     }

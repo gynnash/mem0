@@ -636,7 +636,8 @@ class Memory(MemoryBase):
                         new_status,
                         old_payload,
                         change_source_fact_id=new_fact_id,
-                        new_memory_id=current_memory_id
+                        new_memory_id=current_memory_id,
+                        new_persisted_at=fact_metadata.get("persisted_at"),
                     )
 
                     results.append(build_add_with_attr_result(
@@ -662,7 +663,13 @@ class Memory(MemoryBase):
                     business_memory_id = attr.get("memory_id") if attr else None
 
                     updated_payload = update_memory_weight(
-                        self.vector_store, self.db, old_memory_id, new_weight, old_payload, None, business_memory_id
+                        self.vector_store,
+                        self.db,
+                        old_memory_id,
+                        new_weight,
+                        old_payload,
+                        new_business_memory_id=business_memory_id,
+                        new_persisted_at=fact_metadata.get("persisted_at"),
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -691,7 +698,13 @@ class Memory(MemoryBase):
                         new_weight = old_weight + 0.15
                         business_memory_id = attr.get("memory_id") if attr else None
                         updated_payload = update_memory_weight(
-                            self.vector_store, self.db, old_memory_id, new_weight, old_payload, None, business_memory_id
+                            self.vector_store,
+                            self.db,
+                            old_memory_id,
+                            new_weight,
+                            old_payload,
+                            new_business_memory_id=business_memory_id,
+                            new_persisted_at=fact_metadata.get("persisted_at"),
                         )
                         results.append(build_add_with_attr_result(
                             old_memory_id,
@@ -710,7 +723,13 @@ class Memory(MemoryBase):
 
                     business_memory_id = attr.get("memory_id") if attr else None
                     updated_payload = update_memory_weight(
-                        self.vector_store, self.db, old_memory_id, new_weight, old_payload, None, business_memory_id
+                        self.vector_store,
+                        self.db,
+                        old_memory_id,
+                        new_weight,
+                        old_payload,
+                        new_business_memory_id=business_memory_id,
+                        new_persisted_at=fact_metadata.get("persisted_at"),
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -729,7 +748,13 @@ class Memory(MemoryBase):
 
                     business_memory_id = attr.get("memory_id") if attr else None
                     updated_payload = update_memory_weight(
-                        self.vector_store, self.db, old_memory_id, new_weight, old_payload, None, business_memory_id
+                        self.vector_store,
+                        self.db,
+                        old_memory_id,
+                        new_weight,
+                        old_payload,
+                        new_business_memory_id=business_memory_id,
+                        new_persisted_at=fact_metadata.get("persisted_at"),
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -745,7 +770,14 @@ class Memory(MemoryBase):
                     # Set old fact weight to 0, insert new fact
                     current_memory_id = attr.get("memory_id") if attr else None
                     updated_payload = update_memory_weight(
-                        self.vector_store, self.db, old_memory_id, 0.0, old_payload, new_fact_id, current_memory_id
+                        self.vector_store,
+                        self.db,
+                        old_memory_id,
+                        0.0,
+                        old_payload,
+                        new_fact_id=new_fact_id,
+                        new_business_memory_id=current_memory_id,
+                        new_persisted_at=fact_metadata.get("persisted_at"),
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -788,6 +820,7 @@ class Memory(MemoryBase):
 
             if attr:
                 fact_metadata.update(attr)
+            fact_metadata = normalize_fact_metadata(fact_metadata)
 
             mem_id = self._create_memory_with_attr(
                 fact_text, embedding, fact_metadata

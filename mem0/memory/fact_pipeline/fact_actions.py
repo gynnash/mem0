@@ -24,11 +24,31 @@ def merge_memory_payload(existing_payload, new_payload, *, new_data=None):
     existing_payload = deepcopy(existing_payload or {})
     new_payload = normalize_fact_metadata(deepcopy(new_payload or {}))
     updated_metadata = deepcopy(existing_payload)
+    canonical_memory_id = existing_payload.get("memory_id") or new_payload.get("memory_id")
+    latest_memory_id = (
+        new_payload.get("latest_memory_id")
+        or new_payload.get("memory_id")
+        or existing_payload.get("latest_memory_id")
+        or canonical_memory_id
+    )
 
     for key, value in new_payload.items():
-        if key in {"data", "hash", "created_at", "updated_at", "changetime", "changeto"}:
+        if key in {
+            "data",
+            "hash",
+            "created_at",
+            "updated_at",
+            "changetime",
+            "changeto",
+            "memory_id",
+            "latest_memory_id",
+            "related_memories",
+        }:
             continue
         updated_metadata[key] = value
+
+    updated_metadata["memory_id"] = canonical_memory_id
+    updated_metadata["latest_memory_id"] = latest_memory_id
 
     created_at = existing_payload.get("created_at") or new_payload.get("created_at")
     if created_at:
@@ -40,26 +60,49 @@ def merge_memory_payload(existing_payload, new_payload, *, new_data=None):
 
     updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
     updated_metadata["changetime"] = updated_metadata["updated_at"]
+    related_memories = normalize_related_memories(
+        existing_payload.get("related_memories"),
+        canonical_memory_id,
+    )
+    for related_memory in new_payload.get("related_memories") or []:
+        related_memories = normalize_related_memories(related_memories, related_memory)
     updated_metadata["related_memories"] = normalize_related_memories(
-        updated_metadata.get("related_memories"),
-        updated_metadata.get("memory_id"),
+        related_memories,
+        latest_memory_id,
     )
     return updated_metadata
 
 
-def update_memory_weight(vector_store, db, memory_id, new_weight, existing_payload, new_fact_id=None, new_business_memory_id=None):
+def update_memory_weight(
+    vector_store,
+    db,
+    memory_id,
+    new_weight,
+    existing_payload,
+    new_fact_id=None,
+    new_business_memory_id=None,
+    new_persisted_at=None,
+):
     updated_metadata = deepcopy(existing_payload)
     previous_memory = updated_metadata.get("data")
     updated_metadata["weight"] = new_weight
     updated_metadata["updated_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
     updated_metadata["changetime"] = updated_metadata["updated_at"]
 
+    if new_persisted_at is not None:
+        updated_metadata["persisted_at"] = new_persisted_at
+
     if new_fact_id and updated_metadata.get("fact_id") != new_fact_id:
         updated_metadata["changeto"] = new_fact_id
 
     if new_business_memory_id:
-        updated_metadata["related_memories"] = normalize_related_memories(
+        updated_metadata["latest_memory_id"] = new_business_memory_id
+        related_memories = normalize_related_memories(
             existing_payload.get("related_memories"),
+            existing_payload.get("memory_id"),
+        )
+        updated_metadata["related_memories"] = normalize_related_memories(
+            related_memories,
             new_business_memory_id,
         )
 
@@ -76,14 +119,31 @@ def update_memory_embedding(vector_store, db, memory_id, new_embedding, new_data
     return updated_metadata
 
 
-def update_memory_status(vector_store, db, memory_id, new_status, existing_payload, change_source_fact_id=None, new_memory_id=None):
+def update_memory_status(
+    vector_store,
+    db,
+    memory_id,
+    new_status,
+    existing_payload,
+    change_source_fact_id=None,
+    new_memory_id=None,
+    new_persisted_at=None,
+):
     updated_metadata = deepcopy(existing_payload)
     previous_memory = updated_metadata.get("data")
     updated_metadata["status"] = new_status
 
+    if new_persisted_at is not None:
+        updated_metadata["persisted_at"] = new_persisted_at
+
     if new_memory_id:
-        updated_metadata["related_memories"] = normalize_related_memories(
+        updated_metadata["latest_memory_id"] = new_memory_id
+        related_memories = normalize_related_memories(
             existing_payload.get("related_memories"),
+            existing_payload.get("memory_id"),
+        )
+        updated_metadata["related_memories"] = normalize_related_memories(
+            related_memories,
             new_memory_id,
         )
 
