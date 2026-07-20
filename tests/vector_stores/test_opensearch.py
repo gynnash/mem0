@@ -7,6 +7,7 @@ import dotenv
 
 try:
     from opensearchpy import AWSV4SignerAuth, OpenSearch
+    from opensearchpy.exceptions import ConnectionTimeout
 except ImportError:
     raise ImportError("OpenSearch requires extra dependencies. Install with `pip install opensearch-py`") from None
 
@@ -166,6 +167,7 @@ class TestOpenSearchDB(unittest.TestCase):
         # Check first call
         first_call = self.client_mock.index.call_args_list[0]
         self.assertEqual(first_call[1]["index"], "test_collection")
+        self.assertEqual(first_call[1]["id"], ids[0])
         self.assertEqual(first_call[1]["body"]["vector_field"], vectors[0])
         self.assertEqual(first_call[1]["body"]["payload"], payloads[0])
         self.assertEqual(first_call[1]["body"]["id"], ids[0])
@@ -173,6 +175,7 @@ class TestOpenSearchDB(unittest.TestCase):
         # Check second call
         second_call = self.client_mock.index.call_args_list[1]
         self.assertEqual(second_call[1]["index"], "test_collection")
+        self.assertEqual(second_call[1]["id"], ids[1])
         self.assertEqual(second_call[1]["body"]["vector_field"], vectors[1])
         self.assertEqual(second_call[1]["body"]["payload"], payloads[1])
         self.assertEqual(second_call[1]["body"]["id"], ids[1])
@@ -183,6 +186,35 @@ class TestOpenSearchDB(unittest.TestCase):
         self.assertEqual(results[0].payload, payloads[0])
         self.assertEqual(results[1].id, "id2")
         self.assertEqual(results[1].payload, payloads[1])
+
+    @patch("mem0.vector_stores.opensearch.random.uniform", return_value=1.0)
+    @patch("mem0.vector_stores.opensearch.time.sleep")
+    def test_insert_retries_connection_timeout_with_same_document_id(self, sleep_mock, _uniform_mock):
+        self.client_mock.index.side_effect = [ConnectionTimeout("timed out"), {"_id": "id1"}]
+
+        results = self.os_db.insert(
+            vectors=[[0.1] * 1536],
+            payloads=[{"fact_id": "fact-1"}],
+            ids=["id1"],
+        )
+
+        self.assertEqual(results[0].id, "id1")
+        self.assertEqual(self.client_mock.index.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["id"] for call in self.client_mock.index.call_args_list],
+            ["id1", "id1"],
+        )
+        sleep_mock.assert_called_once_with(1.0)
+
+    @patch("mem0.vector_stores.opensearch.time.sleep")
+    def test_insert_does_not_retry_permanent_errors(self, sleep_mock):
+        self.client_mock.index.side_effect = ValueError("invalid mapping")
+
+        with self.assertRaisesRegex(ValueError, "invalid mapping"):
+            self.os_db.insert(vectors=[[0.1] * 1536], ids=["id1"])
+
+        self.client_mock.index.assert_called_once()
+        sleep_mock.assert_not_called()
 
     def test_get(self):
         mock_response = {"hits": {"hits": [{"_id": "doc1", "_source": {"id": "id1", "payload": {"key1": "value1"}}}]}}
@@ -261,6 +293,30 @@ class TestOpenSearchDB(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "search timed out"):
             self.os_db.search(query="fact", vectors=[0.1] * 1536, limit=5)
 
+    @patch("mem0.vector_stores.opensearch.random.uniform", return_value=1.0)
+    @patch("mem0.vector_stores.opensearch.time.sleep")
+    def test_search_retries_retryable_status_codes(self, sleep_mock, _uniform_mock):
+        overloaded = RuntimeError("service unavailable")
+        overloaded.status_code = 503
+        self.client_mock.search.side_effect = [overloaded, {"hits": {"hits": []}}]
+
+        results = self.os_db.search(query="fact", vectors=[0.1] * 1536, limit=5)
+
+        self.assertEqual(results, [])
+        self.assertEqual(self.client_mock.search.call_count, 2)
+        sleep_mock.assert_called_once_with(1.0)
+
+    @patch("mem0.vector_stores.opensearch.random.uniform", return_value=1.0)
+    @patch("mem0.vector_stores.opensearch.time.sleep")
+    def test_search_stops_after_max_attempts(self, sleep_mock, _uniform_mock):
+        self.client_mock.search.side_effect = ConnectionTimeout("timed out")
+
+        with self.assertRaises(ConnectionTimeout):
+            self.os_db.search(query="fact", vectors=[0.1] * 1536, limit=5)
+
+        self.assertEqual(self.client_mock.search.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [1.0, 2.0])
+
     def test_delete(self):
         mock_search_response = {"hits": {"hits": [{"_id": "doc1", "_source": {"id": "id1"}}]}}
         self.client_mock.search.return_value = mock_search_response
@@ -294,6 +350,8 @@ class TestOpenSearchDB(unittest.TestCase):
                 verify_certs=True,
                 connection_class=unittest.mock.ANY,
                 pool_maxsize=20,
+                max_retries=0,
+                retry_on_timeout=False,
             )
 
 

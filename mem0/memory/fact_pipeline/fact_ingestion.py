@@ -2,6 +2,13 @@ import uuid
 from copy import deepcopy
 
 
+def normalize_applied_fact_ids(values, fact_id=None):
+    applied_fact_ids = values if isinstance(values, list) else []
+    if fact_id:
+        applied_fact_ids = [*applied_fact_ids, fact_id]
+    return list(dict.fromkeys(str(value) for value in applied_fact_ids if value not in (None, "")))
+
+
 def normalize_related_memories(values, business_memory_id=None):
     related_memories = []
     if values is not None:
@@ -29,6 +36,10 @@ def normalize_related_memories(values, business_memory_id=None):
 def normalize_fact_metadata(metadata):
     metadata = deepcopy(metadata or {})
     metadata.setdefault("fact_id", str(uuid.uuid4()))
+    metadata["applied_fact_ids"] = normalize_applied_fact_ids(
+        metadata.get("applied_fact_ids"),
+        metadata.get("fact_id"),
+    )
     if not metadata.get("latest_memory_id"):
         metadata["latest_memory_id"] = metadata.get("memory_id")
     metadata["related_memories"] = normalize_related_memories(

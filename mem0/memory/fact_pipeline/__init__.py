@@ -7,6 +7,7 @@ from mem0.memory.fact_pipeline.fact_actions import (
 )
 from mem0.memory.fact_pipeline.fact_ingestion import (
     build_add_with_attr_result,
+    normalize_applied_fact_ids,
     normalize_fact_metadata,
     normalize_related_memories,
 )
@@ -20,6 +21,7 @@ from mem0.memory.fact_pipeline.fact_matching import (
 __all__ = [
     "ADD_WITH_ATTR_SIMILARITY_THRESHOLD",
     "build_add_with_attr_result",
+    "normalize_applied_fact_ids",
     "normalize_fact_metadata",
     "normalize_related_memories",
     "passes_type_specific_candidate_filter",

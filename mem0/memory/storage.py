@@ -135,20 +135,21 @@ class SQLiteManager:
         is_deleted: int = 0,
         actor_id: Optional[str] = None,
         role: Optional[str] = None,
+        history_id: Optional[str] = None,
     ) -> None:
         with self._lock:
             try:
                 self.connection.execute("BEGIN")
                 self.connection.execute(
                     """
-                    INSERT INTO history (
+                    INSERT OR IGNORE INTO history (
                         id, memory_id, old_memory, new_memory, event,
                         created_at, updated_at, is_deleted, actor_id, role
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
-                        str(uuid.uuid4()),
+                        history_id or str(uuid.uuid4()),
                         memory_id,
                         old_memory,
                         new_memory,

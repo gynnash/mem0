@@ -155,6 +155,20 @@ class TestSQLiteManager:
         assert len(ids) == 3
         assert len(set(ids)) == 3
 
+    def test_add_history_ignores_duplicate_explicit_history_id(self, sqlite_manager, sample_data):
+        for _ in range(2):
+            sqlite_manager.add_history(
+                memory_id=sample_data["memory_id"],
+                old_memory=None,
+                new_memory=sample_data["new_memory"],
+                event="ADD",
+                history_id="stable-history-id",
+            )
+
+        cursor = sqlite_manager.connection.cursor()
+        cursor.execute("SELECT id FROM history WHERE memory_id = ?", (sample_data["memory_id"],))
+        assert cursor.fetchall() == [("stable-history-id",)]
+
     # ========== Get History Tests ==========
 
     def test_get_history_empty(self, sqlite_manager):

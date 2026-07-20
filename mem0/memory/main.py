@@ -406,6 +406,7 @@ class Memory(MemoryBase):
         # Process each new fact individually with its related memories
         all_relationships = defaultdict(list)  # Collect all relationships from all facts
         all_old_memories = {}  # Map memory_id -> memory data
+        idempotent_results = {}
 
         for fact_data in facts_with_embeddings:
             fact_text = fact_data["fact"]
@@ -434,6 +435,29 @@ class Memory(MemoryBase):
 
             # If no related memories found, this fact will be added as new
             if not existing_memories:
+                continue
+
+            incoming_fact_id = fact_attr.get("fact_id")
+            idempotent_match = next(
+                (
+                    memory
+                    for memory in existing_memories
+                    if incoming_fact_id
+                    and (
+                        incoming_fact_id == memory.payload.get("fact_id")
+                        or incoming_fact_id in (memory.payload.get("applied_fact_ids") or [])
+                    )
+                ),
+                None,
+            )
+            if idempotent_match:
+                idempotent_results[fact_idx] = build_add_with_attr_result(
+                    idempotent_match.id,
+                    idempotent_match.payload.get("data", fact_text),
+                    idempotent_match.payload,
+                    "NOOP",
+                    reason="IDEMPOTENT_REPLAY: fact operation already applied",
+                )
                 continue
 
             # Collect related old memories for this fact
@@ -483,21 +507,33 @@ class Memory(MemoryBase):
                 for rel in relationship_result.get("relationships", [])]
             )
 
+        facts_to_process = [
+            fact_data
+            for fact_data in facts_with_embeddings
+            if fact_data["index"] not in idempotent_results
+        ]
+        replay_results = list(idempotent_results.values())
+        if not facts_to_process:
+            return {"results": replay_results}
+
         # If no relationships found (no related memories for any fact), insert all as new
         if not all_relationships:
             logger.info("No related memories found, inserting all facts as new")
-            return self._insert_new_facts_with_attr(
-                facts_with_embeddings, processed_metadata, user_id
+            result = self._insert_new_facts_with_attr(
+                facts_to_process, processed_metadata, user_id
             )
+            result["results"] = replay_results + result["results"]
+            return result
 
         # Process all relationships together
         result = self._process_relationship_results(
-            facts_with_embeddings,
+            facts_to_process,
             all_relationships,
             all_old_memories,
             processed_metadata,
             user_id,
         )
+        result["results"] = replay_results + result["results"]
         return result
 
     def _classify_fact_relationships(self, new_facts, old_memories):
@@ -670,6 +706,7 @@ class Memory(MemoryBase):
                         old_payload,
                         new_business_memory_id=business_memory_id,
                         new_persisted_at=fact_metadata.get("persisted_at"),
+                        operation_fact_id=new_fact_id,
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -705,6 +742,7 @@ class Memory(MemoryBase):
                             old_payload,
                             new_business_memory_id=business_memory_id,
                             new_persisted_at=fact_metadata.get("persisted_at"),
+                            operation_fact_id=new_fact_id,
                         )
                         results.append(build_add_with_attr_result(
                             old_memory_id,
@@ -730,6 +768,7 @@ class Memory(MemoryBase):
                         old_payload,
                         new_business_memory_id=business_memory_id,
                         new_persisted_at=fact_metadata.get("persisted_at"),
+                        operation_fact_id=new_fact_id,
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -755,6 +794,7 @@ class Memory(MemoryBase):
                         old_payload,
                         new_business_memory_id=business_memory_id,
                         new_persisted_at=fact_metadata.get("persisted_at"),
+                        operation_fact_id=new_fact_id,
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -778,6 +818,7 @@ class Memory(MemoryBase):
                         new_fact_id=new_fact_id,
                         new_business_memory_id=current_memory_id,
                         new_persisted_at=fact_metadata.get("persisted_at"),
+                        operation_fact_id=new_fact_id,
                     )
                     results.append(build_add_with_attr_result(
                         old_memory_id,
@@ -832,13 +873,24 @@ class Memory(MemoryBase):
         """Create a memory with attribute metadata.
 
         Handles three types of IDs:
-        1. mem.id - Internal UUID generated by mem0
-        2. attr.fact_id - Fact-specific ID that should match mem.id for new memories
+        1. mem.id - Stable internal UUID derived from user_id and fact_id
+        2. attr.fact_id - Caller-provided fact-specific ID
         3. attr.memory_id - Business-level memory ID that can group multiple facts
         """
-        # Generate internal memory ID for vector storage
-        memory_id = str(uuid.uuid4())
         metadata = normalize_fact_metadata(metadata)
+        fact_id = metadata.get("fact_id")
+        user_id = metadata.get("user_id")
+
+        # Use a stable internal ID so retrying the same fact overwrites the same vector document.
+        if fact_id and user_id:
+            memory_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"mem0-memory:{user_id}:{fact_id}",
+                )
+            )
+        else:
+            memory_id = str(uuid.uuid4())
 
         # Keep the original fact_id and memory_id from metadata if they exist
         # These are business-level IDs and should not be modified
@@ -882,6 +934,12 @@ class Memory(MemoryBase):
             data,
             "ADD",
             created_at=metadata.get("created_at"),
+            history_id=str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"mem0-history:{memory_id}:ADD:{fact_id}",
+                )
+            ),
         )
         return memory_id
 

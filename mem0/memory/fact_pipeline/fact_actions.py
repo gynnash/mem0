@@ -1,13 +1,34 @@
 import hashlib
+import uuid
 from copy import deepcopy
 from datetime import datetime
 
 import pytz
 
-from mem0.memory.fact_pipeline.fact_ingestion import normalize_fact_metadata, normalize_related_memories
+from mem0.memory.fact_pipeline.fact_ingestion import (
+    normalize_applied_fact_ids,
+    normalize_fact_metadata,
+    normalize_related_memories,
+)
 
 
-def record_memory_history(db, memory_id, old_memory, new_memory, payload, event="UPDATE"):
+def record_memory_history(
+    db,
+    memory_id,
+    old_memory,
+    new_memory,
+    payload,
+    event="UPDATE",
+    operation_fact_id=None,
+):
+    history_id = None
+    if operation_fact_id:
+        history_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"mem0-history:{memory_id}:{event}:{operation_fact_id}",
+            )
+        )
     db.add_history(
         memory_id,
         old_memory,
@@ -17,6 +38,7 @@ def record_memory_history(db, memory_id, old_memory, new_memory, payload, event=
         updated_at=payload.get("updated_at"),
         actor_id=payload.get("actor_id"),
         role=payload.get("role"),
+        history_id=history_id,
     )
 
 
@@ -70,6 +92,11 @@ def merge_memory_payload(existing_payload, new_payload, *, new_data=None):
         related_memories,
         latest_memory_id,
     )
+    operation_fact_id = new_payload.get("fact_id")
+    updated_metadata["applied_fact_ids"] = normalize_applied_fact_ids(
+        existing_payload.get("applied_fact_ids"),
+        operation_fact_id,
+    )
     return updated_metadata
 
 
@@ -82,6 +109,7 @@ def update_memory_weight(
     new_fact_id=None,
     new_business_memory_id=None,
     new_persisted_at=None,
+    operation_fact_id=None,
 ):
     updated_metadata = deepcopy(existing_payload)
     previous_memory = updated_metadata.get("data")
@@ -106,8 +134,20 @@ def update_memory_weight(
             new_business_memory_id,
         )
 
+    updated_metadata["applied_fact_ids"] = normalize_applied_fact_ids(
+        existing_payload.get("applied_fact_ids"),
+        operation_fact_id,
+    )
+
     vector_store.update(vector_id=memory_id, vector=None, payload=updated_metadata)
-    record_memory_history(db, memory_id, previous_memory, previous_memory, updated_metadata)
+    record_memory_history(
+        db,
+        memory_id,
+        previous_memory,
+        previous_memory,
+        updated_metadata,
+        operation_fact_id=operation_fact_id,
+    )
     return updated_metadata
 
 
@@ -115,7 +155,14 @@ def update_memory_embedding(vector_store, db, memory_id, new_embedding, new_data
     previous_memory = existing_payload.get("data")
     updated_metadata = merge_memory_payload(existing_payload, new_payload, new_data=new_data)
     vector_store.update(vector_id=memory_id, vector=new_embedding, payload=updated_metadata)
-    record_memory_history(db, memory_id, previous_memory, new_data, updated_metadata)
+    record_memory_history(
+        db,
+        memory_id,
+        previous_memory,
+        new_data,
+        updated_metadata,
+        operation_fact_id=new_payload.get("fact_id"),
+    )
     return updated_metadata
 
 
@@ -151,7 +198,18 @@ def update_memory_status(
     updated_metadata["changetime"] = updated_metadata["updated_at"]
     if change_source_fact_id:
         updated_metadata["changeto"] = change_source_fact_id
+    updated_metadata["applied_fact_ids"] = normalize_applied_fact_ids(
+        existing_payload.get("applied_fact_ids"),
+        change_source_fact_id,
+    )
 
     vector_store.update(vector_id=memory_id, vector=None, payload=updated_metadata)
-    record_memory_history(db, memory_id, previous_memory, previous_memory, updated_metadata)
+    record_memory_history(
+        db,
+        memory_id,
+        previous_memory,
+        previous_memory,
+        updated_metadata,
+        operation_fact_id=change_source_fact_id,
+    )
     return updated_metadata

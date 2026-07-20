@@ -1,9 +1,12 @@
 import logging
+import random
 import time
 from typing import Any, Dict, List, Optional
 
 try:
     from opensearchpy import OpenSearch, RequestsHttpConnection
+    from opensearchpy.exceptions import ConnectionError as OpenSearchConnectionError
+    from opensearchpy.exceptions import ConnectionTimeout
 except ImportError:
     raise ImportError("OpenSearch requires extra dependencies. Install with `pip install opensearch-py`") from None
 
@@ -13,6 +16,10 @@ from mem0.configs.vector_stores.opensearch import OpenSearchConfig
 from mem0.vector_stores.base import VectorStoreBase
 
 logger = logging.getLogger(__name__)
+
+OPENSEARCH_MAX_ATTEMPTS = 3
+OPENSEARCH_RETRY_BASE_DELAY_SECONDS = 1.0
+OPENSEARCH_RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
 
 class OutputData(BaseModel):
@@ -35,6 +42,8 @@ class OpenSearchDB(VectorStoreBase):
             verify_certs=config.verify_certs,
             connection_class=RequestsHttpConnection,
             pool_maxsize=20,
+            max_retries=0,
+            retry_on_timeout=False,
         )
 
         logger.info("Initialized OpenSearch vector store for collection %s", config.collection_name)
@@ -42,6 +51,46 @@ class OpenSearchDB(VectorStoreBase):
         self.collection_name = config.collection_name
         self.embedding_model_dims = config.embedding_model_dims
         self.create_col(self.collection_name, self.embedding_model_dims)
+
+    @staticmethod
+    def _error_status_code(error: Exception) -> Optional[int]:
+        status_code = getattr(error, "status_code", None)
+        try:
+            return int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _is_retryable_error(cls, error: Exception) -> bool:
+        return isinstance(error, (ConnectionTimeout, OpenSearchConnectionError)) or (
+            cls._error_status_code(error) in OPENSEARCH_RETRYABLE_STATUS_CODES
+        )
+
+    def _execute_with_retry(self, operation: str, request, **context):
+        for attempt in range(1, OPENSEARCH_MAX_ATTEMPTS + 1):
+            try:
+                return request()
+            except Exception as error:
+                if not self._is_retryable_error(error) or attempt == OPENSEARCH_MAX_ATTEMPTS:
+                    raise
+
+                delay_seconds = (
+                    OPENSEARCH_RETRY_BASE_DELAY_SECONDS
+                    * (2 ** (attempt - 1))
+                    * random.uniform(0.8, 1.2)
+                )
+                logger.warning(
+                    "OpenSearch transient failure operation=%s attempt=%s max_attempts=%s status_code=%s "
+                    "error_type=%s retry_in_seconds=%.2f context=%s",
+                    operation,
+                    attempt,
+                    OPENSEARCH_MAX_ATTEMPTS,
+                    self._error_status_code(error),
+                    type(error).__name__,
+                    delay_seconds,
+                    context,
+                )
+                time.sleep(delay_seconds)
 
     def create_index(self) -> None:
         """Create OpenSearch index with proper mappings if it doesn't exist."""
@@ -125,7 +174,14 @@ class OpenSearchDB(VectorStoreBase):
             }
             started_at = time.monotonic()
             try:
-                self.client.index(index=self.collection_name, body=body)
+                self._execute_with_retry(
+                    "index",
+                    lambda: self.client.index(index=self.collection_name, id=id_, body=body),
+                    collection=self.collection_name,
+                    vector_id=id_,
+                    fact_id=payload.get("fact_id"),
+                    memory_id=payload.get("memory_id"),
+                )
                 logger.debug(
                     "OpenSearch operation succeeded operation=index collection=%s vector_id=%s fact_id=%s "
                     "memory_id=%s elapsed_ms=%.1f",
@@ -195,7 +251,15 @@ class OpenSearchDB(VectorStoreBase):
         started_at = time.monotonic()
         try:
             # Execute search
-            response = self.client.search(index=self.collection_name, body=query_body)
+            response = self._execute_with_retry(
+                "knn_search",
+                lambda: self.client.search(index=self.collection_name, body=query_body),
+                collection=self.collection_name,
+                user_id=(filters or {}).get("user_id"),
+                memory_id=(filters or {}).get("memory_id"),
+                fact_id=(filters or {}).get("fact_id"),
+                memory_type=(filters or {}).get("memory_type"),
+            )
 
             hits = response["hits"]["hits"]
             results = [
@@ -251,7 +315,12 @@ class OpenSearchDB(VectorStoreBase):
 
         lookup_started_at = time.monotonic()
         try:
-            response = self.client.search(index=self.collection_name, body=search_query)
+            response = self._execute_with_retry(
+                "update_lookup",
+                lambda: self.client.search(index=self.collection_name, body=search_query),
+                collection=self.collection_name,
+                vector_id=vector_id,
+            )
         except Exception:
             logger.exception(
                 "OpenSearch operation failed operation=update_lookup collection=%s vector_id=%s elapsed_ms=%.1f",
@@ -285,7 +354,13 @@ class OpenSearchDB(VectorStoreBase):
         if doc:
             started_at = time.monotonic()
             try:
-                self.client.update(index=self.collection_name, id=opensearch_id, body={"doc": doc})
+                self._execute_with_retry(
+                    "update",
+                    lambda: self.client.update(index=self.collection_name, id=opensearch_id, body={"doc": doc}),
+                    collection=self.collection_name,
+                    vector_id=vector_id,
+                    document_id=opensearch_id,
+                )
             except Exception:
                 logger.exception(
                     "OpenSearch operation failed operation=update collection=%s vector_id=%s document_id=%s "
