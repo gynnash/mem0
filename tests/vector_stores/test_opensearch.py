@@ -161,6 +161,7 @@ class TestOpenSearchDB(unittest.TestCase):
 
         # Verify index was called twice (once for each vector)
         self.assertEqual(self.client_mock.index.call_count, 2)
+        self.client_mock.indices.refresh.assert_not_called()
 
         # Check first call
         first_call = self.client_mock.index.call_args_list[0]
@@ -211,6 +212,15 @@ class TestOpenSearchDB(unittest.TestCase):
         self.assertEqual(update_args["id"], "doc1")
         self.assertEqual(update_args["body"], {"doc": {"vector_field": vector, "payload": payload}})
 
+    def test_update_propagates_client_errors(self):
+        self.client_mock.search.return_value = {
+            "hits": {"hits": [{"_id": "doc1", "_source": {"id": "id1"}}]}
+        }
+        self.client_mock.update.side_effect = RuntimeError("update timed out")
+
+        with self.assertRaisesRegex(RuntimeError, "update timed out"):
+            self.os_db.update("id1", payload={"key": "value"})
+
     def test_list_cols(self):
         self.client_mock.indices.get_alias.return_value = {"test_collection": {}}
         result = self.os_db.list_cols()
@@ -244,6 +254,12 @@ class TestOpenSearchDB(unittest.TestCase):
         self.assertEqual(results[0].id, "id1")
         self.assertEqual(results[0].score, 0.8)
         self.assertEqual(results[0].payload, {"key1": "value1"})
+
+    def test_search_propagates_client_errors(self):
+        self.client_mock.search.side_effect = RuntimeError("search timed out")
+
+        with self.assertRaisesRegex(RuntimeError, "search timed out"):
+            self.os_db.search(query="fact", vectors=[0.1] * 1536, limit=5)
 
     def test_delete(self):
         mock_search_response = {"hits": {"hits": [{"_id": "doc1", "_source": {"id": "id1"}}]}}

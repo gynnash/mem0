@@ -117,23 +117,39 @@ class OpenSearchDB(VectorStoreBase):
 
         results = []
         for i, (vec, id_) in enumerate(zip(vectors, ids)):
+            payload = payloads[i]
             body = {
                 "vector_field": vec,
-                "payload": payloads[i],
+                "payload": payload,
                 "id": id_,
             }
+            started_at = time.monotonic()
             try:
                 self.client.index(index=self.collection_name, body=body)
-                # Force refresh to make documents immediately searchable for tests
-                self.client.indices.refresh(index=self.collection_name)
-                
+                logger.debug(
+                    "OpenSearch operation succeeded operation=index collection=%s vector_id=%s fact_id=%s "
+                    "memory_id=%s elapsed_ms=%.1f",
+                    self.collection_name,
+                    id_,
+                    payload.get("fact_id"),
+                    payload.get("memory_id"),
+                    (time.monotonic() - started_at) * 1000,
+                )
                 results.append(OutputData(
                     id=id_,
                     score=1.0,  # No score for inserts
-                    payload=payloads[i]
+                    payload=payload
                 ))
-            except Exception as e:
-                logger.error(f"Error inserting vector {id_}: {e}")
+            except Exception:
+                logger.exception(
+                    "OpenSearch operation failed operation=index collection=%s vector_id=%s fact_id=%s "
+                    "memory_id=%s elapsed_ms=%.1f",
+                    self.collection_name,
+                    id_,
+                    payload.get("fact_id"),
+                    payload.get("memory_id"),
+                    (time.monotonic() - started_at) * 1000,
+                )
                 raise
 
         return results
@@ -176,6 +192,7 @@ class OpenSearchDB(VectorStoreBase):
         else:
             query_body["query"] = knn_query
 
+        started_at = time.monotonic()
         try:
             # Execute search
             response = self.client.search(index=self.collection_name, body=query_body)
@@ -185,10 +202,30 @@ class OpenSearchDB(VectorStoreBase):
                 OutputData(id=hit["_source"].get("id"), score=hit["_score"], payload=hit["_source"].get("payload", {}))
                 for hit in hits[:limit]  # Ensure we don't exceed limit
             ]
+            logger.debug(
+                "OpenSearch operation succeeded operation=knn_search collection=%s user_id=%s memory_id=%s "
+                "fact_id=%s memory_type=%s hit_count=%s elapsed_ms=%.1f",
+                self.collection_name,
+                (filters or {}).get("user_id"),
+                (filters or {}).get("memory_id"),
+                (filters or {}).get("fact_id"),
+                (filters or {}).get("memory_type"),
+                len(results),
+                (time.monotonic() - started_at) * 1000,
+            )
             return results
-        except Exception as e:
-            logger.error(f"Error during search: {e}")
-            return []
+        except Exception:
+            logger.exception(
+                "OpenSearch operation failed operation=knn_search collection=%s user_id=%s memory_id=%s "
+                "fact_id=%s memory_type=%s elapsed_ms=%.1f",
+                self.collection_name,
+                (filters or {}).get("user_id"),
+                (filters or {}).get("memory_id"),
+                (filters or {}).get("fact_id"),
+                (filters or {}).get("memory_type"),
+                (time.monotonic() - started_at) * 1000,
+            )
+            raise
 
     def delete(self, vector_id: str) -> None:
         """Delete a vector by custom ID."""
@@ -212,8 +249,26 @@ class OpenSearchDB(VectorStoreBase):
         # First, find the document by custom ID
         search_query = {"query": {"term": {"id": vector_id}}}
 
-        response = self.client.search(index=self.collection_name, body=search_query)
+        lookup_started_at = time.monotonic()
+        try:
+            response = self.client.search(index=self.collection_name, body=search_query)
+        except Exception:
+            logger.exception(
+                "OpenSearch operation failed operation=update_lookup collection=%s vector_id=%s elapsed_ms=%.1f",
+                self.collection_name,
+                vector_id,
+                (time.monotonic() - lookup_started_at) * 1000,
+            )
+            raise
         hits = response.get("hits", {}).get("hits", [])
+        logger.debug(
+            "OpenSearch operation succeeded operation=update_lookup collection=%s vector_id=%s hit_count=%s "
+            "elapsed_ms=%.1f",
+            self.collection_name,
+            vector_id,
+            len(hits),
+            (time.monotonic() - lookup_started_at) * 1000,
+        )
 
         if not hits:
             return
@@ -228,10 +283,27 @@ class OpenSearchDB(VectorStoreBase):
             doc["payload"] = payload
 
         if doc:
+            started_at = time.monotonic()
             try:
-                response = self.client.update(index=self.collection_name, id=opensearch_id, body={"doc": doc})
+                self.client.update(index=self.collection_name, id=opensearch_id, body={"doc": doc})
             except Exception:
-                pass
+                logger.exception(
+                    "OpenSearch operation failed operation=update collection=%s vector_id=%s document_id=%s "
+                    "elapsed_ms=%.1f",
+                    self.collection_name,
+                    vector_id,
+                    opensearch_id,
+                    (time.monotonic() - started_at) * 1000,
+                )
+                raise
+            logger.debug(
+                "OpenSearch operation succeeded operation=update collection=%s vector_id=%s document_id=%s "
+                "elapsed_ms=%.1f",
+                self.collection_name,
+                vector_id,
+                opensearch_id,
+                (time.monotonic() - started_at) * 1000,
+            )
 
     def get(self, vector_id: str) -> Optional[OutputData]:
         """Retrieve a vector by ID."""
