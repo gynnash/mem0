@@ -1,0 +1,53 @@
+"""Domain vocabulary and immutable models for the V3 memory kernel."""
+
+from mem0.v3.domain.enums import (
+    AssertionValidity,
+    EpistemicType,
+    EvidenceValidity,
+    FulfillmentStatus,
+    LifecycleOperation,
+    MemoryObjectType,
+    Polarity,
+    RelationType,
+    RetentionStatus,
+    RetractionTargetType,
+    WorkflowStatus,
+)
+from mem0.v3.domain.models import (
+    Assertion,
+    CanonicalObject,
+    CommitmentPayload,
+    DecisionPayload,
+    Evidence,
+    FieldProvenance,
+    IssuePayload,
+    MeetingPayload,
+    ObjectVersion,
+    Relation,
+    TopicPayload,
+)
+
+__all__ = [
+    "Assertion",
+    "AssertionValidity",
+    "CanonicalObject",
+    "CommitmentPayload",
+    "DecisionPayload",
+    "EpistemicType",
+    "Evidence",
+    "EvidenceValidity",
+    "FieldProvenance",
+    "FulfillmentStatus",
+    "IssuePayload",
+    "LifecycleOperation",
+    "MeetingPayload",
+    "MemoryObjectType",
+    "ObjectVersion",
+    "Polarity",
+    "Relation",
+    "RelationType",
+    "RetentionStatus",
+    "RetractionTargetType",
+    "TopicPayload",
+    "WorkflowStatus",
+]
