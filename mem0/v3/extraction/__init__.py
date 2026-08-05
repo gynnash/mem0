@@ -3,12 +3,17 @@ from mem0.v3.extraction.models import (
     ClaimLifecycleSignal,
     ClaimType,
     EvidenceSpan,
+    EvidenceUnit,
     ExtractedClaim,
     ExtractedProjectMention,
     LocalExtractionResult,
     MeetingExtractionInput,
     SessionTopicCandidate,
     TranscriptSegment,
+    UnitBackedExtractedClaim,
+    UnitBackedExtractedProjectMention,
+    UnitBackedLocalExtractionResult,
+    UnitBackedSessionTopicCandidate,
 )
 from mem0.v3.extraction.service import ExtractionValidationError, LocalExtractionService
 
@@ -17,6 +22,7 @@ __all__ = [
     "ClaimLifecycleSignal",
     "ClaimType",
     "EvidenceSpan",
+    "EvidenceUnit",
     "ExtractedClaim",
     "ExtractedProjectMention",
     "ExtractionValidationError",
@@ -25,4 +31,8 @@ __all__ = [
     "MeetingExtractionInput",
     "SessionTopicCandidate",
     "TranscriptSegment",
+    "UnitBackedExtractedClaim",
+    "UnitBackedExtractedProjectMention",
+    "UnitBackedLocalExtractionResult",
+    "UnitBackedSessionTopicCandidate",
 ]

@@ -99,6 +99,57 @@ class EvidenceSpan(FrozenContract):
         return self
 
 
+class EvidenceUnit(FrozenContract):
+    evidence_unit_id: NonEmptyStr
+    segment_id: NonEmptyStr
+    text: NonEmptyStr
+
+
+class UnitBackedExtractedProjectMention(FrozenContract):
+    mention: NonEmptyStr
+    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class UnitBackedExtractedClaim(FrozenContract):
+    claim_id: NonEmptyStr
+    claim_type: ClaimType
+    text: NonEmptyStr
+    owner_mention: Optional[NonEmptyStr] = None
+    due_at: Optional[datetime] = None
+    condition: Optional[NonEmptyStr] = None
+    negated: bool = False
+    modality: ClaimModality
+    lifecycle_signal: ClaimLifecycleSignal = ClaimLifecycleSignal.NONE
+    project_mentions: tuple[NonEmptyStr, ...] = ()
+    object_mentions: tuple[NonEmptyStr, ...] = ()
+    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+    @field_validator("due_at")
+    @classmethod
+    def validate_due_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _require_timezone(value) if value is not None else value
+
+
+class UnitBackedSessionTopicCandidate(FrozenContract):
+    candidate_id: NonEmptyStr
+    label: NonEmptyStr
+    explicit_name: bool = False
+    project_mentions: tuple[NonEmptyStr, ...] = ()
+    object_anchors: tuple[NonEmptyStr, ...] = ()
+    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class UnitBackedLocalExtractionResult(FrozenContract):
+    extraction_version: NonEmptyStr
+    claims: tuple[UnitBackedExtractedClaim, ...] = ()
+    project_mentions: tuple[UnitBackedExtractedProjectMention, ...] = ()
+    topic_candidates: tuple[UnitBackedSessionTopicCandidate, ...] = ()
+    warnings: tuple[NonEmptyStr, ...] = ()
+
+
 class ExtractedProjectMention(FrozenContract):
     mention: NonEmptyStr
     evidence_spans: tuple[EvidenceSpan, ...] = Field(min_length=1)
