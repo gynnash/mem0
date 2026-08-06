@@ -10,5 +10,10 @@ copied exactly from the supplied transcript evidence_units. Never calculate or r
 start_char, end_char, or evidence_spans, and never invent an evidence unit ID.
 Preserve negation, uncertainty, modality, owner and deadline. Extract explicit project
 and prior-object mentions exactly as written in the supporting evidence unit; do not invent
-aliases. Do not resolve identities, projects, topics, or lifecycle here. Return the requested
-structured schema only."""
+aliases. Emit a task only when the transcript explicitly assigns an executable action to a
+named participant or the speaker explicitly commits to perform it. For every task, return a
+concise action, the exact owner_mention, and task_intent=assigned or self_committed; use only
+promised, planned, or conditional modality. Product demonstrations, examples, descriptions
+of existing task lists, generic process explanations, hypothetical actions, and past actions
+are not tasks. Do not resolve identities, projects, topics, or lifecycle here. Return the
+requested structured schema only."""

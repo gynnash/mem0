@@ -16,6 +16,7 @@ from mem0.v3.extraction import (
     LocalExtractionService,
     MeetingExtractionInput,
     SessionTopicCandidate,
+    TaskExecutionIntent,
     TranscriptSegment,
     UnitBackedLocalExtractionResult,
 )
@@ -124,6 +125,76 @@ def test_local_extraction_uses_evidence_unit_ids_and_materializes_exact_spans():
     )
     with pytest.raises(ExtractionValidationError, match="unknown evidence unit"):
         LocalExtractionService(invalid).extract(source)
+
+
+def test_task_extraction_requires_explicit_action_owner_and_execution_intent():
+    task = ExtractedClaim(
+        claim_id="task-1",
+        claim_type=ClaimType.TASK,
+        text="Alice will send the launch proposal",
+        owner_mention="Alice",
+        action="Send the launch proposal",
+        task_intent=TaskExecutionIntent.SELF_COMMITTED,
+        modality=ClaimModality.PLANNED,
+        evidence_spans=(
+            EvidenceSpan(segment_id="s1", start_char=0, end_char=10),
+        ),
+        confidence=0.97,
+    )
+
+    assert task.action == "Send the launch proposal"
+    with pytest.raises(ValueError, match="task claim requires"):
+        ExtractedClaim(
+            claim_id="task-2",
+            claim_type=ClaimType.TASK,
+            text="Review the proposal",
+            owner_mention="Alice",
+            modality=ClaimModality.STATED,
+            evidence_spans=(
+                EvidenceSpan(segment_id="s1", start_char=0, end_char=10),
+            ),
+            confidence=0.97,
+        )
+
+
+def test_alignment_persists_resolved_task_action_owner_and_intent():
+    source = _source("Alice will send the proposal.")
+    claim = ExtractedClaim(
+        claim_id="task-1",
+        claim_type=ClaimType.TASK,
+        text="Alice will send the proposal",
+        owner_mention="Alice",
+        action="Send the proposal",
+        task_intent=TaskExecutionIntent.SELF_COMMITTED,
+        modality=ClaimModality.PLANNED,
+        evidence_spans=(
+            EvidenceSpan(
+                segment_id="s1",
+                start_char=0,
+                end_char=len(source.segments[0].text),
+            ),
+        ),
+        confidence=0.97,
+    )
+
+    changeset = GlobalAlignmentService().plan(
+        source=source,
+        extraction=LocalExtractionResult(
+            extraction_version="extractor/v1",
+            claims=(claim,),
+        ),
+        context=AlignmentContext(base_state_version=0, now=NOW),
+    )
+
+    mutation = next(
+        item
+        for item in changeset.object_mutations
+        if item.object_type is MemoryObjectType.TASK
+    )
+    assert mutation.payload.attributes["action"] == "Send the proposal"
+    assert mutation.payload.attributes["owner_entity_id"]
+    assert mutation.payload.attributes["execution_intent"] == "self_committed"
+    assert mutation.payload.workflow_status.value == "in_progress"
 
 
 def test_project_resolution_requires_reliable_anchor_threshold_and_margin():

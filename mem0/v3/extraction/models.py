@@ -34,6 +34,11 @@ class ClaimModality(str, Enum):
     UNCERTAIN = "uncertain"
 
 
+class TaskExecutionIntent(str, Enum):
+    ASSIGNED = "assigned"
+    SELF_COMMITTED = "self_committed"
+
+
 class ClaimLifecycleSignal(str, Enum):
     NONE = "none"
     RESOLVED = "resolved"
@@ -116,6 +121,8 @@ class UnitBackedExtractedClaim(FrozenContract):
     claim_type: ClaimType
     text: NonEmptyStr
     owner_mention: Optional[NonEmptyStr] = None
+    action: Optional[NonEmptyStr] = None
+    task_intent: Optional[TaskExecutionIntent] = None
     due_at: Optional[datetime] = None
     condition: Optional[NonEmptyStr] = None
     negated: bool = False
@@ -130,6 +137,11 @@ class UnitBackedExtractedClaim(FrozenContract):
     @classmethod
     def validate_due_at(cls, value: Optional[datetime]) -> Optional[datetime]:
         return _require_timezone(value) if value is not None else value
+
+    @model_validator(mode="after")
+    def validate_task_fields(self) -> "UnitBackedExtractedClaim":
+        _validate_task_fields(self)
+        return self
 
 
 class UnitBackedSessionTopicCandidate(FrozenContract):
@@ -161,6 +173,8 @@ class ExtractedClaim(FrozenContract):
     claim_type: ClaimType
     text: NonEmptyStr
     owner_mention: Optional[NonEmptyStr] = None
+    action: Optional[NonEmptyStr] = None
+    task_intent: Optional[TaskExecutionIntent] = None
     due_at: Optional[datetime] = None
     condition: Optional[NonEmptyStr] = None
     negated: bool = False
@@ -175,6 +189,30 @@ class ExtractedClaim(FrozenContract):
     @classmethod
     def validate_due_at(cls, value: Optional[datetime]) -> Optional[datetime]:
         return _require_timezone(value) if value is not None else value
+
+    @model_validator(mode="after")
+    def validate_task_fields(self) -> "ExtractedClaim":
+        _validate_task_fields(self)
+        return self
+
+
+def _validate_task_fields(claim) -> None:
+    task_fields = (claim.action, claim.task_intent)
+    if claim.claim_type is ClaimType.TASK:
+        if claim.owner_mention is None or any(value is None for value in task_fields):
+            raise ValueError(
+                "task claim requires owner_mention, action and task_intent"
+            )
+        if claim.modality not in {
+            ClaimModality.PROMISED,
+            ClaimModality.PLANNED,
+            ClaimModality.CONDITIONAL,
+        }:
+            raise ValueError(
+                "task claim requires promised, planned or conditional modality"
+            )
+    elif any(value is not None for value in task_fields):
+        raise ValueError("action and task_intent are only valid for task claims")
 
 
 class SessionTopicCandidate(FrozenContract):

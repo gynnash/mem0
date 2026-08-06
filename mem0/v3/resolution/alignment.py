@@ -565,6 +565,21 @@ class GlobalAlignmentService:
                     ),
                 }
             )
+        elif claim.claim_type is ClaimType.TASK:
+            is_completed = (
+                claim.lifecycle_signal is ClaimLifecycleSignal.RESOLVED
+            )
+            payload["attributes"].update(
+                {
+                    "action": claim.action,
+                    "owner_entity_id": owner_ref,
+                    "execution_intent": claim.task_intent.value,
+                    "due_at": claim.due_at,
+                }
+            )
+            payload["workflow_status"] = (
+                "completed" if is_completed else "in_progress"
+            )
         elif claim.claim_type in {ClaimType.BLOCKER, ClaimType.OBJECTION}:
             payload.update(
                 {
