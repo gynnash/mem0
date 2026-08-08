@@ -83,6 +83,23 @@ def test_object_search_document_uses_only_allowlisted_semantic_fields():
     assert "do not index" not in document.search_text
 
 
+def test_object_search_document_deduplicates_repeated_semantic_fields():
+    document = plan_object_search_document(
+        object_id="project:coffee",
+        memory_object={
+            "object_type": "project",
+            "title": "咖啡项目",
+            "description": "  咖啡项目  ",
+            "attributes": {
+                "canonical_label": "咖啡项目",
+                "identity_aliases": ["咖啡项目", "精品咖啡"],
+            },
+        },
+    )
+
+    assert document.search_text == "咖啡项目 精品咖啡"
+
+
 def test_evidence_and_assertion_search_documents_are_deterministic():
     evidence = plan_evidence_search_document(
         evidence_id="evidence:1",

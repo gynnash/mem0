@@ -41,7 +41,7 @@ def plan_object_search_document(
     *, object_id: str, memory_object: Mapping[str, Any]
 ) -> MemorySearchDocument:
     attributes = memory_object.get("attributes") or {}
-    attribute_text = _flatten_searchable_attributes(attributes)
+    attribute_values = _flatten_searchable_attributes(attributes)
     return MemorySearchDocument(
         document_kind="object",
         document_id=object_id,
@@ -50,7 +50,7 @@ def plan_object_search_document(
             (
                 memory_object.get("title"),
                 memory_object.get("description"),
-                attribute_text,
+                *attribute_values,
             ),
             fallback="object",
         ),
@@ -89,7 +89,9 @@ def plan_assertion_search_document(
     )
 
 
-def _flatten_searchable_attributes(attributes: Mapping[str, Any]) -> str:
+def _flatten_searchable_attributes(
+    attributes: Mapping[str, Any],
+) -> tuple[str, ...]:
     values: list[str] = []
     for key in sorted(SEARCHABLE_OBJECT_ATTRIBUTE_KEYS):
         value = attributes.get(key)
@@ -104,13 +106,16 @@ def _flatten_searchable_attributes(attributes: Mapping[str, Any]) -> str:
                 if isinstance(item, (str, int, float))
                 and not isinstance(item, bool)
             )
-    return " ".join(values)
+    return tuple(values)
 
 
 def _search_text(values: Sequence[Any], *, fallback: str) -> str:
-    text = " ".join(
-        part
-        for value in values
-        if (part := " ".join(str(value or "").split()))
-    )
+    parts: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        part = " ".join(str(value or "").split())
+        if part and part not in seen:
+            seen.add(part)
+            parts.append(part)
+    text = " ".join(parts)
     return text or fallback
