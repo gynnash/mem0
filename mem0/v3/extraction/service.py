@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from typing import Dict
 
 from mem0.v3.extraction.models import (
+    EpisodicEvidence,
     EvidenceSpan,
     EvidenceUnit,
     ExtractedClaim,
+    ExtractedEntityMention,
     ExtractedProjectMention,
     LocalExtractionResult,
     MeetingExtractionInput,
@@ -33,6 +35,7 @@ class _MaterializedEvidenceUnit:
     unit: EvidenceUnit
     start_char: int
     end_char: int
+    speaker_ref: str | None
 
 
 class LocalExtractionService:
@@ -93,10 +96,14 @@ class LocalExtractionService:
             ),
             response_model=UnitBackedLocalExtractionResult,
         )
-        response = self._materialize_evidence_spans(
+        response = self._materialize_result(
             unit_backed_response, evidence_units
         )
-        self._validate_spans(source.segments, response)
+        self._validate_result(
+            source.segments,
+            response,
+            evidence_units=evidence_units,
+        )
         return response
 
     @classmethod
@@ -134,6 +141,7 @@ class LocalExtractionService:
                 ),
                 start_char=start_char,
                 end_char=end_char,
+                speaker_ref=segment.speaker_ref,
             )
             for index, (start_char, end_char) in enumerate(ranges)
         )
@@ -153,38 +161,47 @@ class LocalExtractionService:
             start = bounded_end
 
     @classmethod
-    def _materialize_evidence_spans(
+    def _materialize_result(
         cls,
         result: UnitBackedLocalExtractionResult,
         evidence_units: Dict[str, _MaterializedEvidenceUnit],
     ) -> LocalExtractionResult:
+        episodes = tuple(
+            EpisodicEvidence(
+                **item.model_dump(
+                    exclude={"evidence_unit_ids", "primary_speaker_ref"}
+                ),
+                primary_speaker_ref=(
+                    item.primary_speaker_ref
+                    or cls._single_speaker_ref(
+                        item.evidence_unit_ids, evidence_units
+                    )
+                ),
+                source_spans=cls._spans_for_unit_ids(
+                    item.evidence_unit_ids, evidence_units
+                ),
+            )
+            for item in result.episodic_evidence
+        )
         return LocalExtractionResult(
             extraction_version=result.extraction_version,
+            episodic_evidence=episodes,
             claims=tuple(
                 ExtractedClaim(
-                    **item.model_dump(exclude={"evidence_unit_ids"}),
-                    evidence_spans=cls._spans_for_unit_ids(
-                        item.evidence_unit_ids, evidence_units
-                    ),
+                    **item.model_dump(),
                 )
                 for item in result.claims
             ),
+            entity_mentions=tuple(
+                ExtractedEntityMention(**item.model_dump())
+                for item in result.entity_mentions
+            ),
             project_mentions=tuple(
-                ExtractedProjectMention(
-                    **item.model_dump(exclude={"evidence_unit_ids"}),
-                    evidence_spans=cls._spans_for_unit_ids(
-                        item.evidence_unit_ids, evidence_units
-                    ),
-                )
+                ExtractedProjectMention(**item.model_dump())
                 for item in result.project_mentions
             ),
             topic_candidates=tuple(
-                SessionTopicCandidate(
-                    **item.model_dump(exclude={"evidence_unit_ids"}),
-                    evidence_spans=cls._spans_for_unit_ids(
-                        item.evidence_unit_ids, evidence_units
-                    ),
-                )
+                SessionTopicCandidate(**item.model_dump())
                 for item in result.topic_candidates
             ),
             warnings=result.warnings,
@@ -212,26 +229,74 @@ class LocalExtractionService:
         return tuple(spans)
 
     @staticmethod
-    def _validate_spans(
-        segments: tuple[TranscriptSegment, ...], result: LocalExtractionResult
+    def _single_speaker_ref(unit_ids, evidence_units):
+        speakers = {
+            evidence_units[unit_id].speaker_ref
+            for unit_id in unit_ids
+            if unit_id in evidence_units
+            and evidence_units[unit_id].speaker_ref is not None
+        }
+        return next(iter(speakers)) if len(speakers) == 1 else None
+
+    @classmethod
+    def _validate_result(
+        cls,
+        segments: tuple[TranscriptSegment, ...],
+        result: LocalExtractionResult,
+        *,
+        evidence_units: Dict[str, _MaterializedEvidenceUnit],
     ) -> None:
         by_id: Dict[str, TranscriptSegment] = {item.segment_id: item for item in segments}
-        spans = []
-        spans.extend(
-            span for claim in result.claims for span in claim.evidence_spans
+        episode_ids = tuple(item.evidence_id for item in result.episodic_evidence)
+        if len(episode_ids) != len(set(episode_ids)):
+            raise ExtractionValidationError(
+                "episodic Evidence IDs must be unique"
+            )
+        unit_order = {unit_id: index for index, unit_id in enumerate(evidence_units)}
+        for episode in result.episodic_evidence:
+            for span in episode.source_spans:
+                cls._validate_span(by_id, span)
+            source_unit_ids = tuple(
+                unit_id
+                for unit_id, materialized in evidence_units.items()
+                if any(
+                    materialized.unit.segment_id == span.segment_id
+                    and materialized.start_char == span.start_char
+                    and materialized.end_char == span.end_char
+                    for span in episode.source_spans
+                )
+            )
+            positions = sorted(unit_order[value] for value in source_unit_ids)
+            if positions and positions[-1] - positions[0] + 1 != len(positions):
+                raise ExtractionValidationError(
+                    "episodic Evidence units must be adjacent"
+                )
+            cited_speakers = {
+                by_id[span.segment_id].speaker_ref
+                for span in episode.source_spans
+                if by_id[span.segment_id].speaker_ref
+            }
+            if (
+                episode.primary_speaker_ref is not None
+                and episode.primary_speaker_ref not in cited_speakers
+            ):
+                raise ExtractionValidationError(
+                    "episodic Evidence primary speaker is outside cited units"
+                )
+        allowed_ids = set(episode_ids)
+        semantic_groups = (
+            result.claims,
+            result.entity_mentions,
+            result.project_mentions,
+            result.topic_candidates,
         )
-        spans.extend(
-            span
-            for mention in result.project_mentions
-            for span in mention.evidence_spans
-        )
-        spans.extend(
-            span
-            for topic in result.topic_candidates
-            for span in topic.evidence_spans
-        )
-        for span in spans:
-            LocalExtractionService._validate_span(by_id, span)
+        for group in semantic_groups:
+            for item in group:
+                referenced = set(item.episodic_evidence_ids)
+                if not referenced.issubset(allowed_ids):
+                    raise ExtractionValidationError(
+                        "semantic item references unknown episodic Evidence"
+                    )
 
     @staticmethod
     def _validate_span(

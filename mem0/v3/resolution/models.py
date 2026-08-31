@@ -149,4 +149,7 @@ class AlignmentContext(FrozenContract):
     entity_candidates_by_participant: dict[str, tuple[EntityCandidate, ...]] = Field(
         default_factory=dict
     )
+    entity_candidates_by_mention: dict[str, tuple[EntityCandidate, ...]] = Field(
+        default_factory=dict
+    )
     now: datetime

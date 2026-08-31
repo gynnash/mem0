@@ -1,7 +1,7 @@
 """Global alignment that emits a domain draft, never physical write commands."""
 
 import hashlib
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from mem0.v3.contracts import (
     AssertionMutation,
@@ -24,7 +24,6 @@ from mem0.v3.domain import (
 from mem0.v3.extraction import (
     ClaimType,
     ClaimLifecycleSignal,
-    EvidenceSpan,
     LocalExtractionResult,
     MeetingExtractionInput,
     SessionTopicCandidate,
@@ -96,11 +95,11 @@ class GlobalAlignmentService:
         extraction: LocalExtractionResult,
         context: AlignmentContext,
     ) -> ValidatedMemoryChangeSet:
-        evidence_creates, evidence_by_span = self._build_evidence(source, extraction)
-        all_evidence_refs = tuple(item.logical_ref for item in evidence_creates)
-        meeting_evidence = all_evidence_refs or self._fallback_evidence(
-            source, evidence_creates, evidence_by_span
+        evidence_creates, evidence_by_episode = self._build_evidence(
+            source, extraction
         )
+        all_evidence_refs = tuple(item.logical_ref for item in evidence_creates)
+        meeting_evidence = all_evidence_refs
         meeting_operation, meeting_id, meeting_version = self._meeting_resolver.resolve(
             memory_id=source.memory_id,
             transcript_version=source.transcript_version,
@@ -143,8 +142,17 @@ class GlobalAlignmentService:
         alignment_warnings = list(extraction.warnings)
         participant_entity_refs = {}
         project_refs_by_mention = {}
+        participant_evidence = self._participant_evidence_refs(
+            extraction=extraction,
+            evidence_by_episode=evidence_by_episode,
+        )
 
         for participant_ref in source.participant_refs:
+            evidence_refs = participant_evidence.get(
+                _normalized(participant_ref), ()
+            )
+            if not evidence_refs:
+                continue
             entity_decision = self._entity_resolver.resolve(
                 participant_ref=participant_ref,
                 candidates=context.entity_candidates_by_participant.get(
@@ -163,7 +171,7 @@ class GlobalAlignmentService:
                         logical_ref=entity_ref,
                         operation=LifecycleOperation.CREATE,
                         object_type=MemoryObjectType.ENTITY,
-                        evidence_ids=meeting_evidence,
+                        evidence_ids=evidence_refs,
                         payload={
                             "canonical_key": entity_ref,
                             "title": participant_ref,
@@ -194,9 +202,77 @@ class GlobalAlignmentService:
                     source_ref=entity_ref,
                     target_ref=meeting_ref,
                     relation_type="participated_in",
-                    evidence_ids=meeting_evidence,
+                    evidence_ids=evidence_refs,
                     valid_from=source.started_at,
                     confidence=entity_decision.confidence,
+                    epistemic_type=EpistemicType.OBSERVED,
+                )
+            )
+
+        entity_refs_by_mention = dict(participant_entity_refs)
+        for mention in extraction.entity_mentions:
+            normalized_mention = _normalized(mention.mention)
+            mention_evidence = self._evidence_refs(
+                mention.episodic_evidence_ids,
+                evidence_by_episode,
+            )
+            entity_ref = entity_refs_by_mention.get(normalized_mention)
+            confidence = mention.confidence
+            if entity_ref is None:
+                entity_decision = self._entity_resolver.resolve(
+                    participant_ref=mention.mention,
+                    candidates=context.entity_candidates_by_mention.get(
+                        mention.mention, ()
+                    ),
+                )
+                confidence = min(confidence, entity_decision.confidence)
+                if entity_decision.entity_object_id is not None:
+                    entity_ref = entity_decision.entity_object_id
+                else:
+                    entity_ref = (
+                        f"entity:{source.memory_id}:"
+                        f"{_stable_token('mention', mention.mention)}"
+                    )
+                    object_mutations.append(
+                        ObjectMutation(
+                            logical_ref=entity_ref,
+                            operation=LifecycleOperation.CREATE,
+                            object_type=MemoryObjectType.ENTITY,
+                            evidence_ids=mention_evidence,
+                            payload={
+                                "canonical_key": entity_ref,
+                                "title": mention.mention,
+                                "valid_from": source.started_at,
+                                "confidence": confidence,
+                                "attributes": {
+                                    "identity_scope": "meeting_mention",
+                                    "identity_aliases": (
+                                        {
+                                            "value": mention.mention,
+                                            "confidence": confidence,
+                                            "user_confirmed": False,
+                                        },
+                                    ),
+                                    "resolver_version": (
+                                        entity_decision.resolver_version
+                                    ),
+                                },
+                            },
+                        )
+                    )
+                entity_refs_by_mention[normalized_mention] = entity_ref
+            relation_mutations.append(
+                self._relation(
+                    logical_ref=(
+                        f"relation:entity-mention:{source.memory_id}:"
+                        f"{_stable_token(entity_ref, *mention.episodic_evidence_ids)}"
+                    ),
+                    source_ref=entity_ref,
+                    target_ref=meeting_ref,
+                    relation_type="mentioned_in",
+                    evidence_ids=mention_evidence,
+                    valid_from=source.started_at,
+                    confidence=confidence,
                     epistemic_type=EpistemicType.OBSERVED,
                 )
             )
@@ -206,7 +282,7 @@ class GlobalAlignmentService:
             if normalized_mention in project_refs_by_mention:
                 continue
             mention_evidence = self._evidence_refs(
-                mention.evidence_spans, evidence_by_span
+                mention.episodic_evidence_ids, evidence_by_episode
             )
             candidates = context.project_candidates_by_mention.get(
                 mention.mention, ()
@@ -261,8 +337,12 @@ class GlobalAlignmentService:
             )
 
         for claim in extraction.claims:
-            claim_evidence = self._evidence_refs(claim.evidence_spans, evidence_by_span)
-            owner_ref = participant_entity_refs.get(_normalized(claim.owner_mention))
+            claim_evidence = self._evidence_refs(
+                claim.episodic_evidence_ids, evidence_by_episode
+            )
+            owner_ref = entity_refs_by_mention.get(
+                _normalized(claim.owner_mention)
+            )
             assertion_ref = f"assertion:{source.memory_id}:{claim.claim_id}"
             if claim.claim_type is ClaimType.CONDITION:
                 assertion_mutations.append(
@@ -454,7 +534,7 @@ class GlobalAlignmentService:
                 topic=topic,
                 context=context,
                 meeting_ref=meeting_ref,
-                evidence_by_span=evidence_by_span,
+                evidence_by_episode=evidence_by_episode,
                 object_mutations=object_mutations,
                 relation_mutations=relation_mutations,
             )
@@ -651,11 +731,14 @@ class GlobalAlignmentService:
         topic: SessionTopicCandidate,
         context,
         meeting_ref,
-        evidence_by_span,
+        evidence_by_episode,
         object_mutations,
         relation_mutations,
     ):
-        evidence_ids = self._evidence_refs(topic.evidence_spans, evidence_by_span)
+        evidence_ids = self._evidence_refs(
+            topic.episodic_evidence_ids,
+            evidence_by_episode,
+        )
         decision = self._topic_resolver.resolve(
             session_candidate=topic,
             matches=context.topic_matches_by_candidate.get(topic.candidate_id, ()),
@@ -791,44 +874,74 @@ class GlobalAlignmentService:
 
     @staticmethod
     def _evidence_refs(
-        spans: tuple[EvidenceSpan, ...], evidence_by_span: Dict[Tuple[str, int, int], str]
+        episodic_evidence_ids,
+        evidence_by_episode,
     ) -> tuple[str, ...]:
         return tuple(
             dict.fromkeys(
-                evidence_by_span[(span.segment_id, span.start_char, span.end_char)]
-                for span in spans
+                evidence_by_episode[evidence_id]
+                for evidence_id in episodic_evidence_ids
             )
         )
+
+    @classmethod
+    def _participant_evidence_refs(cls, *, extraction, evidence_by_episode):
+        evidence_by_participant = {}
+
+        def add(mention, episode_ids):
+            normalized = _normalized(mention)
+            if not normalized:
+                return
+            values = evidence_by_participant.setdefault(normalized, [])
+            for evidence_ref in cls._evidence_refs(
+                episode_ids, evidence_by_episode
+            ):
+                if evidence_ref not in values:
+                    values.append(evidence_ref)
+
+        for episode in extraction.episodic_evidence:
+            add(episode.primary_speaker_ref, (episode.evidence_id,))
+        return {
+            key: tuple(values)
+            for key, values in evidence_by_participant.items()
+        }
 
     @staticmethod
     def _build_evidence(source, extraction):
         segment_by_id = {item.segment_id: item for item in source.segments}
-        spans = []
-        spans.extend(span for claim in extraction.claims for span in claim.evidence_spans)
-        spans.extend(
-            span
-            for mention in extraction.project_mentions
-            for span in mention.evidence_spans
-        )
-        spans.extend(
-            span
-            for topic in extraction.topic_candidates
-            for span in topic.evidence_spans
-        )
+        segment_order = {
+            item.segment_id: index for index, item in enumerate(source.segments)
+        }
         evidence = []
-        by_span = {}
-        for span in spans:
-            key = (span.segment_id, span.start_char, span.end_char)
-            if key in by_span:
-                continue
-            segment = segment_by_id[span.segment_id]
-            content = segment.text[span.start_char : span.end_char]
+        by_episode = {}
+        for episode in extraction.episodic_evidence:
+            ordered_spans = tuple(
+                sorted(
+                    episode.source_spans,
+                    key=lambda span: (
+                        segment_order[span.segment_id],
+                        span.start_char,
+                        span.end_char,
+                    ),
+                )
+            )
+            referenced_segments = tuple(
+                segment_by_id[span.segment_id] for span in ordered_spans
+            )
+            first_segment = referenced_segments[0]
+            last_segment = referenced_segments[-1]
+            content = episode.content.strip()
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             logical_ref = (
-                f"evidence:{source.memory_id}:{source.transcript_version}:"
-                f"{_stable_token(*key, digest)}"
+                "evidence:"
+                f"{_stable_token(source.memory_id, source.transcript_version, episode.evidence_id, digest, length=48)}"
             )
-            by_span[key] = logical_ref
+            by_episode[episode.evidence_id] = logical_ref
+            source_id = str(first_segment.segment_id)
+            if first_segment.segment_id != last_segment.segment_id:
+                source_id = (
+                    f"{first_segment.segment_id}..{last_segment.segment_id}"
+                )
             evidence.append(
                 EvidenceCreate(
                     logical_ref=logical_ref,
@@ -836,13 +949,17 @@ class GlobalAlignmentService:
                         evidence_id=logical_ref,
                         user_id=source.user_id,
                         workspace_id=source.workspace_id,
-                        source_type="transcript_segment",
-                        source_id=span.segment_id,
+                        source_type="episodic_event",
+                        source_id=source_id,
                         memory_id=source.memory_id,
                         transcript_version=source.transcript_version,
-                        speaker_id=segment.speaker_ref,
-                        start_ms=segment.start_ms,
-                        end_ms=segment.end_ms,
+                        speaker_id=episode.primary_speaker_ref,
+                        start_ms=min(
+                            segment.start_ms for segment in referenced_segments
+                        ),
+                        end_ms=max(
+                            segment.end_ms for segment in referenced_segments
+                        ),
                         content=content,
                         content_hash=digest,
                         recorded_at=source.started_at,
@@ -850,40 +967,4 @@ class GlobalAlignmentService:
                     ),
                 )
             )
-        return evidence, by_span
-
-    @staticmethod
-    def _fallback_evidence(source, evidence_creates, evidence_by_span):
-        segment = source.segments[0]
-        span = EvidenceSpan(
-            segment_id=segment.segment_id, start_char=0, end_char=len(segment.text)
-        )
-        content = segment.text
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        logical_ref = (
-            f"evidence:{source.memory_id}:{source.transcript_version}:"
-            f"{_stable_token(span.segment_id, span.start_char, span.end_char, digest)}"
-        )
-        evidence_by_span[(span.segment_id, span.start_char, span.end_char)] = logical_ref
-        evidence_creates.append(
-            EvidenceCreate(
-                logical_ref=logical_ref,
-                evidence=Evidence(
-                    evidence_id=logical_ref,
-                    user_id=source.user_id,
-                    workspace_id=source.workspace_id,
-                    source_type="transcript_segment",
-                    source_id=segment.segment_id,
-                    memory_id=source.memory_id,
-                    transcript_version=source.transcript_version,
-                    speaker_id=segment.speaker_ref,
-                    start_ms=segment.start_ms,
-                    end_ms=segment.end_ms,
-                    content=content,
-                    content_hash=digest,
-                    recorded_at=source.started_at,
-                    created_at=source.started_at,
-                ),
-            )
-        )
-        return (logical_ref,)
+        return evidence, by_episode

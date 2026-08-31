@@ -110,9 +110,37 @@ class EvidenceUnit(FrozenContract):
     text: NonEmptyStr
 
 
+class UnitBackedEpisodicEvidence(FrozenContract):
+    evidence_id: NonEmptyStr
+    content: NonEmptyStr
+    primary_speaker_ref: Optional[NonEmptyStr] = None
+    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1, max_length=4)
+    confidence: float = Field(ge=0, le=1)
+
+
+class EpisodicEvidence(FrozenContract):
+    evidence_id: NonEmptyStr
+    content: NonEmptyStr
+    primary_speaker_ref: Optional[NonEmptyStr] = None
+    source_spans: tuple[EvidenceSpan, ...] = Field(min_length=1, max_length=4)
+    confidence: float = Field(ge=0, le=1)
+
+
+class UnitBackedEntityMention(FrozenContract):
+    mention: NonEmptyStr
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class ExtractedEntityMention(FrozenContract):
+    mention: NonEmptyStr
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
 class UnitBackedExtractedProjectMention(FrozenContract):
     mention: NonEmptyStr
-    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
 
@@ -130,7 +158,7 @@ class UnitBackedExtractedClaim(FrozenContract):
     lifecycle_signal: ClaimLifecycleSignal = ClaimLifecycleSignal.NONE
     project_mentions: tuple[NonEmptyStr, ...] = ()
     object_mentions: tuple[NonEmptyStr, ...] = ()
-    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
     @field_validator("due_at")
@@ -150,13 +178,15 @@ class UnitBackedSessionTopicCandidate(FrozenContract):
     explicit_name: bool = False
     project_mentions: tuple[NonEmptyStr, ...] = ()
     object_anchors: tuple[NonEmptyStr, ...] = ()
-    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
 
 class UnitBackedLocalExtractionResult(FrozenContract):
     extraction_version: NonEmptyStr
+    episodic_evidence: tuple[UnitBackedEpisodicEvidence, ...] = ()
     claims: tuple[UnitBackedExtractedClaim, ...] = ()
+    entity_mentions: tuple[UnitBackedEntityMention, ...] = ()
     project_mentions: tuple[UnitBackedExtractedProjectMention, ...] = ()
     topic_candidates: tuple[UnitBackedSessionTopicCandidate, ...] = ()
     warnings: tuple[NonEmptyStr, ...] = ()
@@ -164,7 +194,7 @@ class UnitBackedLocalExtractionResult(FrozenContract):
 
 class ExtractedProjectMention(FrozenContract):
     mention: NonEmptyStr
-    evidence_spans: tuple[EvidenceSpan, ...] = Field(min_length=1)
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
 
@@ -182,7 +212,7 @@ class ExtractedClaim(FrozenContract):
     lifecycle_signal: ClaimLifecycleSignal = ClaimLifecycleSignal.NONE
     project_mentions: tuple[NonEmptyStr, ...] = ()
     object_mentions: tuple[NonEmptyStr, ...] = ()
-    evidence_spans: tuple[EvidenceSpan, ...] = Field(min_length=1)
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
     @field_validator("due_at")
@@ -221,13 +251,15 @@ class SessionTopicCandidate(FrozenContract):
     explicit_name: bool = False
     project_mentions: tuple[NonEmptyStr, ...] = ()
     object_anchors: tuple[NonEmptyStr, ...] = ()
-    evidence_spans: tuple[EvidenceSpan, ...] = Field(min_length=1)
+    episodic_evidence_ids: tuple[NonEmptyStr, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
 
 
 class LocalExtractionResult(FrozenContract):
     extraction_version: NonEmptyStr
+    episodic_evidence: tuple[EpisodicEvidence, ...] = ()
     claims: tuple[ExtractedClaim, ...] = ()
+    entity_mentions: tuple[ExtractedEntityMention, ...] = ()
     project_mentions: tuple[ExtractedProjectMention, ...] = ()
     topic_candidates: tuple[SessionTopicCandidate, ...] = ()
     warnings: tuple[NonEmptyStr, ...] = ()
