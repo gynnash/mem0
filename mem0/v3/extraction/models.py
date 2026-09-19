@@ -1,10 +1,11 @@
 """Structured contracts for source-local transcript understanding."""
 
 from datetime import datetime
+import json
 from enum import Enum
 from typing import Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from mem0.v3.contracts.base import FrozenContract, NonEmptyStr
 
@@ -114,7 +115,10 @@ class UnitBackedEpisodicEvidence(FrozenContract):
     evidence_id: NonEmptyStr
     content: NonEmptyStr
     primary_speaker_ref: Optional[NonEmptyStr] = None
-    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(min_length=1, max_length=4)
+    evidence_unit_ids: tuple[NonEmptyStr, ...] = Field(
+        min_length=1,
+        description="Exact source unit IDs. Prefer 1 to 4 consecutive units; the kernel splits longer or discontinuous citations without dropping units.",
+    )
     confidence: float = Field(ge=0, le=1)
 
 
@@ -263,3 +267,59 @@ class LocalExtractionResult(FrozenContract):
     project_mentions: tuple[ExtractedProjectMention, ...] = ()
     topic_candidates: tuple[SessionTopicCandidate, ...] = ()
     warnings: tuple[NonEmptyStr, ...] = ()
+
+
+ISOLATION_WARNING_PREFIX = "extraction_quarantine:"
+
+
+def isolation_warning(field, index, item_id, reason):
+    return ISOLATION_WARNING_PREFIX + json.dumps({
+        "field": field, "index": index, "item_id": item_id, "reason": reason,
+    }, sort_keys=True)
+
+
+def extraction_isolation_report(warnings):
+    return tuple(json.loads(value[len(ISOLATION_WARNING_PREFIX):])
+                 for value in warnings if value.startswith(ISOLATION_WARNING_PREFIX))
+
+
+class PartialUnitBackedLocalExtractionResult(UnitBackedLocalExtractionResult):
+    """Strict envelope with independently validated items; used only at model ingress."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def isolate_invalid_items(cls, value):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        warnings = value.get("warnings", ())
+        if not isinstance(warnings, (list, tuple)) or not all(isinstance(w, str) and w for w in warnings):
+            raise ValueError("extraction warnings must be a sequence of nonempty strings")
+        warnings = [w for w in warnings if not w.startswith(ISOLATION_WARNING_PREFIX)]
+        contracts = {
+            "episodic_evidence": UnitBackedEpisodicEvidence,
+            "claims": UnitBackedExtractedClaim,
+            "entity_mentions": UnitBackedEntityMention,
+            "project_mentions": UnitBackedExtractedProjectMention,
+            "topic_candidates": UnitBackedSessionTopicCandidate,
+        }
+        invalid_evidence_ids = set()
+        for field, contract in contracts.items():
+            items = value.get(field, ())
+            if not isinstance(items, (list, tuple)):
+                raise ValueError(f"extraction {field} must be a sequence")
+            accepted = []
+            for index, item in enumerate(items):
+                try:
+                    accepted.append(contract.model_validate(item))
+                except ValidationError:
+                    item_id = next((item.get(key) for key in ("evidence_id", "claim_id", "candidate_id")
+                                    if isinstance(item.get(key), str)), None) if isinstance(item, dict) else None
+                    warnings.append(isolation_warning(field, index, item_id, "invalid_item_schema"))
+                    if field == "episodic_evidence" and item_id is not None:
+                        invalid_evidence_ids.add(item_id)
+            value[field] = accepted
+        value["episodic_evidence"] = [item for item in value["episodic_evidence"]
+                                       if item.evidence_id not in invalid_evidence_ids]
+        value["warnings"] = warnings
+        return value

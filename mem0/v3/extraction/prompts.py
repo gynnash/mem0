@@ -12,7 +12,7 @@ only once. Omit greetings, filler, content-free agreement, unrecoverable ASR fra
 generic process chatter, and repetition that adds no information.
 
 Each episodic Evidence item must:
-- cite 1 to 4 adjacent evidence_unit_ids copied exactly from the supplied transcript;
+- prefer 1 to 4 adjacent evidence_unit_ids copied exactly from the supplied transcript;
 - contain 1 to 3 concise, self-contained sentences faithful to those units;
 - name the person, project, or subject when the cited local context makes it unambiguous;
 - preserve names, numbers, dates, negation, uncertainty, modality, reasons, and conditions;
@@ -24,11 +24,18 @@ If useful related information occurs far apart, emit separate faithful episodic 
 items with unique IDs, then cite those multiple IDs from the supported semantic item.
 Do not fill citation gaps with unrelated units; do not combine conflicting or changed
 positions into one statement. Retain each source's speaker, time and qualifications.
+If a citation is longer or discontinuous, the kernel retains every cited unit in separate
+source-quoted groups and updates semantic references. Never truncate supporting citations
+or invent IDs to fit a grouping limit. Semantic items may reference all resulting groups.
 Merge same-meeting repetition only when no new detail is added. Keep conflicting views as
 separate episodic Evidence. Never calculate or return character offsets or source spans.
 
 Then extract decisions, commitments, conditions, objections, blockers, tasks, goals,
 preferences, named-person mentions, project mentions, and session topic candidates. Every
+claim must express one atomic proposition with its own complete supporting citations.
+Separate a decision, its owner commitment, and budget approval into distinct claims;
+do not combine them into a compound claim whose support can only be checked as a whole.
+Every
 semantic item must cite one or more episodic_evidence_ids emitted in the same response;
 never cite transcript evidence_unit_ids directly. Extract person and project mentions as
 written in the supported local context and do not resolve identities or aliases here.

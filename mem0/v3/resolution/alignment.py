@@ -21,6 +21,7 @@ from mem0.v3.domain import (
     MemoryObjectType,
     Polarity,
 )
+from mem0.v3.extraction.models import extraction_isolation_report
 from mem0.v3.extraction import (
     ClaimType,
     ClaimLifecycleSignal,
@@ -127,6 +128,8 @@ class GlobalAlignmentService:
                 "confidence": 1,
                 "attributes": {
                     "transcript_content_hash": source.transcript_content_hash,
+                    "extraction_completeness": "partial" if extraction_isolation_report(extraction.warnings) else "complete",
+                    "extraction_isolation": extraction_isolation_report(extraction.warnings),
                 },
                 "field_provenance": (
                     FieldProvenance(

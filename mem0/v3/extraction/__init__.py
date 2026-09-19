@@ -18,6 +18,7 @@ from mem0.v3.extraction.models import (
     UnitBackedEntityMention,
     UnitBackedExtractedProjectMention,
     UnitBackedLocalExtractionResult,
+    PartialUnitBackedLocalExtractionResult,
     UnitBackedSessionTopicCandidate,
 )
 from mem0.v3.extraction.service import ExtractionValidationError, LocalExtractionService
@@ -44,5 +45,6 @@ __all__ = [
     "UnitBackedEntityMention",
     "UnitBackedExtractedProjectMention",
     "UnitBackedLocalExtractionResult",
+    "PartialUnitBackedLocalExtractionResult",
     "UnitBackedSessionTopicCandidate",
 ]

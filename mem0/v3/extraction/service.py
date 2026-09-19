@@ -17,6 +17,9 @@ from mem0.v3.extraction.models import (
     SessionTopicCandidate,
     TranscriptSegment,
     UnitBackedLocalExtractionResult,
+    PartialUnitBackedLocalExtractionResult,
+    isolation_warning,
+    extraction_isolation_report,
 )
 from mem0.v3.extraction.prompts import LOCAL_EXTRACTION_SYSTEM_PROMPT
 from mem0.v3.ports import ModelMessage, ModelPort, StructuredModelRequest
@@ -26,6 +29,10 @@ class ExtractionValidationError(ValueError):
     def __init__(self, message, *, details=()):
         super().__init__(message)
         self.details = tuple(details)
+
+
+class NoUsableEvidenceError(ExtractionValidationError):
+    pass
 
 
 MAX_EVIDENCE_UNIT_CHARS = 240
@@ -95,34 +102,102 @@ class LocalExtractionService:
                 "transcript_version": source.transcript_version,
             },
         )
-        for attempt in range(2):
-            unit_backed_response = self._model.generate_structured(
-                request=request, response_model=UnitBackedLocalExtractionResult,
-            )
-            try:
-                response = self._materialize_result(unit_backed_response, evidence_units)
-                self._validate_result(source.segments, response, evidence_units=evidence_units)
-                return response
-            except ExtractionValidationError as error:
-                if attempt == 1:
-                    raise
-                feedback = {
-                    "error": str(error), "details": error.details,
-                    "instruction": (
-                        "Repair the complete extraction JSON once using only the original source. "
-                        "For nonadjacent citations, split into independently faithful episodic evidence "
-                        "with unique IDs, each citing 1 to 4 adjacent units. Rewrite each item's text "
-                        "to match only its own units. Update all semantic references to the resulting "
-                        "evidence IDs; a claim may cite multiple separate episodes. Do not bridge gaps "
-                        "by adding unrelated units or discard supported details to pass validation. "
-                        "Preserve speakers, time, negation, uncertainty and conflicting views."
-                    ),
-                }
-                request = request.model_copy(update={"messages": (
-                    *request.messages,
-                    ModelMessage(role="assistant", content=unit_backed_response.model_dump_json()),
-                    ModelMessage(role="system", content=json.dumps(feedback, ensure_ascii=False)),
-                ), "metadata": {**request.metadata, "semantic_repair": 1}})
+        raw = self._model.generate_structured(
+            request=request, response_model=PartialUnitBackedLocalExtractionResult,
+        )
+        isolated = self._isolate_invalid_evidence(raw, evidence_units)
+        normalized = self._normalize_citation_groups(isolated, evidence_units)
+        response = self._materialize_result(normalized, evidence_units)
+        self._validate_result(source.segments, response, evidence_units=evidence_units)
+        if not response.episodic_evidence and extraction_isolation_report(response.warnings):
+            raise NoUsableEvidenceError("No usable evidence remains after local isolation",
+                                            details=extraction_isolation_report(response.warnings))
+        return response
+
+    @classmethod
+    def _isolate_invalid_evidence(cls, result, evidence_units):
+        warnings = list(result.warnings)
+        by_id, ambiguous = {}, set()
+        for item in result.episodic_evidence:
+            if item.evidence_id in by_id and item != by_id[item.evidence_id]:
+                ambiguous.add(item.evidence_id)
+            by_id[item.evidence_id] = item
+        accepted = []
+        for index, item in enumerate(by_id.values()):
+            reason = None
+            if item.evidence_id in ambiguous:
+                reason = "ambiguous_evidence_id"
+            elif any(value not in evidence_units for value in item.evidence_unit_ids):
+                reason = "unknown_source_unit"
+            elif (item.primary_speaker_ref is not None and item.primary_speaker_ref not in
+                  {evidence_units[value].speaker_ref for value in item.evidence_unit_ids}):
+                reason = "speaker_outside_source"
+            if reason:
+                warnings.append(isolation_warning("episodic_evidence", index, item.evidence_id, reason))
+            else:
+                accepted.append(item)
+        allowed = {item.evidence_id for item in accepted}
+        updates = {"episodic_evidence": tuple(accepted)}
+        for field in ("claims", "entity_mentions", "project_mentions", "topic_candidates"):
+            items = []
+            for index, item in enumerate(getattr(result, field)):
+                if not set(item.episodic_evidence_ids).issubset(allowed):
+                    warnings.append(isolation_warning(field, index,
+                        getattr(item, "claim_id", getattr(item, "candidate_id", None)), "missing_or_ambiguous_support"))
+                else:
+                    items.append(item)
+            updates[field] = tuple(items)
+        updates["warnings"] = tuple(warnings)
+        return result.model_copy(update=updates)
+
+    @classmethod
+    def _normalize_citation_groups(cls, result, evidence_units):
+        """Split source-backed citations, never copy combined prose onto a subset."""
+        occupied = {item.evidence_id for item in result.episodic_evidence}
+        if len(occupied) != len(result.episodic_evidence):
+            raise ExtractionValidationError("episodic Evidence IDs must be unique")
+        order = {unit_id: index for index, unit_id in enumerate(evidence_units)}
+        episodes, replacements, warnings = [], {}, list(result.warnings)
+        for item in result.episodic_evidence:
+            # Validate every supplied ID before sorting or splitting. Never drop unknown IDs.
+            cls._spans_for_unit_ids(item.evidence_unit_ids, evidence_units)
+            speakers = {evidence_units[value].speaker_ref for value in item.evidence_unit_ids}
+            if item.primary_speaker_ref is not None and item.primary_speaker_ref not in speakers:
+                raise ExtractionValidationError("episodic Evidence primary speaker is outside cited units")
+            groups = []
+            for unit_id in sorted(set(item.evidence_unit_ids), key=order.__getitem__):
+                if (not groups or len(groups[-1]) == 4
+                        or order[unit_id] != order[groups[-1][-1]] + 1
+                        or evidence_units[unit_id].speaker_ref != evidence_units[groups[-1][-1]].speaker_ref):
+                    groups.append([])
+                groups[-1].append(unit_id)
+            if len(groups) == 1:
+                episodes.append(item.model_copy(update={"evidence_unit_ids": tuple(groups[0])}))
+                continue
+            ids = []
+            for index, group in enumerate(groups, 1):
+                new_id = f"{item.evidence_id}:part:{index}"
+                while new_id in occupied:
+                    new_id += ":split"
+                occupied.add(new_id)
+                ids.append(new_id)
+                episodes.append(item.model_copy(update={
+                    "evidence_id": new_id,
+                    "evidence_unit_ids": tuple(group),
+                    "content": " ".join(evidence_units[value].unit.text for value in group),
+                    "primary_speaker_ref": cls._single_speaker_ref(group, evidence_units),
+                }))
+            replacements[item.evidence_id] = tuple(ids)
+            warnings.append(f"Evidence {item.evidence_id} split into source-quoted citation groups.")
+        updates = {"episodic_evidence": tuple(episodes), "warnings": tuple(warnings)}
+        for field in ("claims", "entity_mentions", "project_mentions", "topic_candidates"):
+            updates[field] = tuple(item.model_copy(update={
+                "episodic_evidence_ids": tuple(dict.fromkeys(
+                    replacement for value in item.episodic_evidence_ids
+                    for replacement in replacements.get(value, (value,))
+                )),
+            }) for item in getattr(result, field))
+        return result.model_copy(update=updates)
 
     @classmethod
     def _split_transcript(
