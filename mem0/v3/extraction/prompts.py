@@ -18,6 +18,12 @@ Each episodic Evidence item must:
 - preserve names, numbers, dates, negation, uncertainty, modality, reasons, and conditions;
 - use primary_speaker_ref only when that speaker appears in the cited units;
 - never add a fact, conclusion, identity, project, or causal relationship absent from source.
+Adjacent means consecutive units in the supplied transcript order, without skipping a unit.
+For example u0 and u2 with u1 between them cannot form one episodic Evidence item.
+If useful related information occurs far apart, emit separate faithful episodic Evidence
+items with unique IDs, then cite those multiple IDs from the supported semantic item.
+Do not fill citation gaps with unrelated units; do not combine conflicting or changed
+positions into one statement. Retain each source's speaker, time and qualifications.
 Merge same-meeting repetition only when no new detail is added. Keep conflicting views as
 separate episodic Evidence. Never calculate or return character offsets or source spans.
 

@@ -23,7 +23,9 @@ from mem0.v3.ports import ModelMessage, ModelPort, StructuredModelRequest
 
 
 class ExtractionValidationError(ValueError):
-    pass
+    def __init__(self, message, *, details=()):
+        super().__init__(message)
+        self.details = tuple(details)
 
 
 MAX_EVIDENCE_UNIT_CHARS = 240
@@ -62,49 +64,65 @@ class LocalExtractionService:
             }
             for segment in source.segments
         ]
-        unit_backed_response = self._model.generate_structured(
-            request=StructuredModelRequest(
-                operation="memory_v3.local_extraction",
-                timeout_ms=self._timeout_ms,
-                messages=(
-                    ModelMessage(role="system", content=LOCAL_EXTRACTION_SYSTEM_PROMPT),
-                    ModelMessage(
-                        role="user",
-                        content=json.dumps(
-                            {
-                                "meeting": {
-                                    "memory_id": source.memory_id,
-                                    "title": source.title,
-                                    "started_at": source.started_at.isoformat(),
-                                    "ended_at": (
-                                        source.ended_at.isoformat()
-                                        if source.ended_at is not None
-                                        else None
-                                    ),
-                                    "participant_refs": source.participant_refs,
-                                },
-                                "transcript_segments": transcript,
+        request = StructuredModelRequest(
+            operation="memory_v3.local_extraction",
+            timeout_ms=self._timeout_ms,
+            messages=(
+                ModelMessage(role="system", content=LOCAL_EXTRACTION_SYSTEM_PROMPT),
+                ModelMessage(
+                    role="user",
+                    content=json.dumps(
+                        {
+                            "meeting": {
+                                "memory_id": source.memory_id,
+                                "title": source.title,
+                                "started_at": source.started_at.isoformat(),
+                                "ended_at": (
+                                    source.ended_at.isoformat()
+                                    if source.ended_at is not None
+                                    else None
+                                ),
+                                "participant_refs": source.participant_refs,
                             },
-                            ensure_ascii=False,
-                        ),
+                            "transcript_segments": transcript,
+                        },
+                        ensure_ascii=False,
                     ),
                 ),
-                metadata={
-                    "memory_id": source.memory_id,
-                    "transcript_version": source.transcript_version,
-                },
             ),
-            response_model=UnitBackedLocalExtractionResult,
+            metadata={
+                "memory_id": source.memory_id,
+                "transcript_version": source.transcript_version,
+            },
         )
-        response = self._materialize_result(
-            unit_backed_response, evidence_units
-        )
-        self._validate_result(
-            source.segments,
-            response,
-            evidence_units=evidence_units,
-        )
-        return response
+        for attempt in range(2):
+            unit_backed_response = self._model.generate_structured(
+                request=request, response_model=UnitBackedLocalExtractionResult,
+            )
+            try:
+                response = self._materialize_result(unit_backed_response, evidence_units)
+                self._validate_result(source.segments, response, evidence_units=evidence_units)
+                return response
+            except ExtractionValidationError as error:
+                if attempt == 1:
+                    raise
+                feedback = {
+                    "error": str(error), "details": error.details,
+                    "instruction": (
+                        "Repair the complete extraction JSON once using only the original source. "
+                        "For nonadjacent citations, split into independently faithful episodic evidence "
+                        "with unique IDs, each citing 1 to 4 adjacent units. Rewrite each item's text "
+                        "to match only its own units. Update all semantic references to the resulting "
+                        "evidence IDs; a claim may cite multiple separate episodes. Do not bridge gaps "
+                        "by adding unrelated units or discard supported details to pass validation. "
+                        "Preserve speakers, time, negation, uncertainty and conflicting views."
+                    ),
+                }
+                request = request.model_copy(update={"messages": (
+                    *request.messages,
+                    ModelMessage(role="assistant", content=unit_backed_response.model_dump_json()),
+                    ModelMessage(role="system", content=json.dumps(feedback, ensure_ascii=False)),
+                ), "metadata": {**request.metadata, "semantic_repair": 1}})
 
     @classmethod
     def _split_transcript(
@@ -253,7 +271,8 @@ class LocalExtractionService:
                 "episodic Evidence IDs must be unique"
             )
         unit_order = {unit_id: index for index, unit_id in enumerate(evidence_units)}
-        for episode in result.episodic_evidence:
+        adjacency_errors = []
+        for episode_index, episode in enumerate(result.episodic_evidence):
             for span in episode.source_spans:
                 cls._validate_span(by_id, span)
             source_unit_ids = tuple(
@@ -268,9 +287,17 @@ class LocalExtractionService:
             )
             positions = sorted(unit_order[value] for value in source_unit_ids)
             if positions and positions[-1] - positions[0] + 1 != len(positions):
-                raise ExtractionValidationError(
-                    "episodic Evidence units must be adjacent"
-                )
+                groups = []
+                for unit_id in source_unit_ids:
+                    if not groups or unit_order[unit_id] != unit_order[groups[-1][-1]] + 1:
+                        groups.append([])
+                    groups[-1].append(unit_id)
+                adjacency_errors.append({
+                    "path": ["episodic_evidence", episode_index, "evidence_unit_ids"],
+                    "evidence_id": episode.evidence_id,
+                    "code": "nonadjacent_evidence_units",
+                    "contiguous_groups": groups,
+                })
             cited_speakers = {
                 by_id[span.segment_id].speaker_ref
                 for span in episode.source_spans
@@ -283,6 +310,10 @@ class LocalExtractionService:
                 raise ExtractionValidationError(
                     "episodic Evidence primary speaker is outside cited units"
                 )
+        if adjacency_errors:
+            raise ExtractionValidationError(
+                "episodic Evidence units must be adjacent", details=adjacency_errors,
+            )
         allowed_ids = set(episode_ids)
         semantic_groups = (
             result.claims,

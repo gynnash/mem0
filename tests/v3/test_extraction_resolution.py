@@ -155,6 +155,63 @@ def test_local_extraction_selects_episodic_evidence_and_materializes_source_span
         LocalExtractionService(invalid).extract(source)
 
 
+def test_nonadjacent_evidence_is_repaired_once_with_exact_groups_and_updated_claims():
+    source = _source("Ship Friday, discuss costs, cancel launch.")
+    invalid = {"extraction_version": "test/v1", "episodic_evidence": [
+        {"evidence_id": "combined", "content": "Ship Friday; cancel launch.",
+         "evidence_unit_ids": ["s1:u0", "s1:u2"], "confidence": 0.9},
+    ], "claims": [{"claim_id": "change", "claim_type": "decision", "text": "Launch was cancelled.",
+                   "modality": "stated", "episodic_evidence_ids": ["combined"], "confidence": 0.9}]}
+    repaired = {**invalid, "episodic_evidence": [
+        {"evidence_id": "initial", "content": "Ship Friday.", "evidence_unit_ids": ["s1:u0"], "confidence": 0.9},
+        {"evidence_id": "later", "content": "Cancel launch.", "evidence_unit_ids": ["s1:u2"], "confidence": 0.9},
+    ], "claims": [{**invalid["claims"][0], "episodic_evidence_ids": ["initial", "later"]}]}
+
+    class RepairModel(FakeModel):
+        def generate_structured(self, *, request, response_model):
+            self.requests.append((request, response_model))
+            return response_model.model_validate(invalid if len(self.requests) == 1 else repaired)
+
+    model = RepairModel(invalid)
+    result = LocalExtractionService(model).extract(source)
+    assert len(model.requests) == 2
+    feedback = json.loads(model.requests[1][0].messages[-1].content)
+    assert feedback["details"] == [{
+        "path": ["episodic_evidence", 0, "evidence_unit_ids"], "evidence_id": "combined",
+        "code": "nonadjacent_evidence_units", "contiguous_groups": [["s1:u0"], ["s1:u2"]],
+    }]
+    assert result.claims[0].episodic_evidence_ids == ("initial", "later")
+    assert [item.content for item in result.episodic_evidence] == ["Ship Friday.", "Cancel launch."]
+    assert [item.primary_speaker_ref for item in result.episodic_evidence] == ["Alice", "Alice"]
+    spans = [item.source_spans[0] for item in result.episodic_evidence]
+    assert [source.segments[0].text[span.start_char:span.end_char] for span in spans] == ["Ship Friday,", "cancel launch."]
+
+
+@pytest.mark.parametrize("repair_kind", ["unchanged", "stale_reference", "wrong_speaker"])
+def test_semantic_repair_cannot_bypass_adjacency_references_or_speaker_checks(repair_kind):
+    source = _source("One, middle, three.")
+    invalid = {"extraction_version": "test/v1", "episodic_evidence": [
+        {"evidence_id": "bad", "content": "One and three", "evidence_unit_ids": ["s1:u0", "s1:u2"], "confidence": 0.9},
+    ]}
+
+    class RepairModel(FakeModel):
+        def generate_structured(self, *, request, response_model):
+            self.requests.append((request, response_model))
+            value = invalid
+            if len(self.requests) > 1 and repair_kind != "unchanged":
+                value = {**invalid, "episodic_evidence": [{**invalid["episodic_evidence"][0],
+                         "evidence_unit_ids": ["s1:u0"], "primary_speaker_ref": "Bob" if repair_kind == "wrong_speaker" else "Alice"}]}
+                if repair_kind == "stale_reference":
+                    value["claims"] = [{"claim_id": "c1", "claim_type": "decision", "text": "One",
+                        "modality": "stated", "episodic_evidence_ids": ["missing"], "confidence": 0.9}]
+            return response_model.model_validate(value)
+
+    model = RepairModel(invalid)
+    with pytest.raises(ExtractionValidationError):
+        LocalExtractionService(model).extract(source)
+    assert len(model.requests) == 2
+
+
 def test_participant_links_only_use_that_persons_episodic_evidence():
     source = MeetingExtractionInput(
         user_id="7",
