@@ -15,6 +15,16 @@ from mem0.v3.domain import Evidence
 from mem0.v3.planner import MemoryChangeDraft, MemoryPlanner
 
 
+class SpeakerIdentityAmbiguity(ValueError):
+    def __init__(self, fields):
+        self.fields = tuple({item["field_key"]: item for item in fields}.values())
+        super().__init__("speaker-dependent fields require source-local verification")
+
+
+class SpeakerIdentityScopeError(ValueError):
+    pass
+
+
 def plan_person_identity_merge(*, operation_key, user_id, workspace_id, base_state_version,
                                source_speaker_ids, target_speaker_id, source_object_ids,
                                target_object_id, target_name, evidence, objects, assertions, relations, now):
@@ -168,6 +178,8 @@ class SpeakerNameScope:
     new_name: str
     original_speaker_ref: str | None = None
     speaker_ref: str | None = None
+    previous_speaker_refs: tuple[str, ...] = ()
+    assignment_source: str = "manual"
 
     def contains(self, evidence: Evidence) -> bool:
         if evidence.memory_id != self.memory_id or evidence.transcript_version != self.transcript_version:
@@ -228,7 +240,8 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
                                  base_state_version: int, scopes: Sequence[SpeakerNameScope],
                                  evidence: Sequence[Evidence], objects: Sequence[Mapping],
                                  assertions: Sequence[Mapping], relations: Sequence[Mapping],
-                                 now: datetime):
+                                 now: datetime, correct_identity=False, source_metadata=None,
+                                 identity_decisions=None):
     """Create replacement versions and migrate references without adding facts.
 
     Callers supply the authorized current dependency closure, not model output.
@@ -239,6 +252,21 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
     creates, retracts, object_changes, assertion_changes, relation_changes = [], [], [], [], []
     remap = {}
     assertion_map = {}
+    identities = {}
+    entity_refs = {row["payload"].get("attributes", {}).get("speaker_ref"): row["object_id"]
+                   for row in objects if row["object_type"] == "entity" and str(
+                       row["payload"].get("attributes", {}).get("speaker_ref", "")).startswith("speaker:")}
+
+    def previous_entity(item):
+        candidates = {row["object_id"] for row in objects if row["object_type"] == "entity"
+                      and row["payload"].get("attributes", {}).get("speaker_ref") == item.speaker_id
+                      and (str(item.speaker_id).startswith("speaker:") or item.evidence_id in row["evidence_ids"])}
+        if len(candidates) > 1:
+            raise SpeakerIdentityScopeError("speaker has multiple possible source entities")
+        return next(iter(candidates), None)
+    created_entities = set()
+    ambiguities = []
+    identity_decisions = identity_decisions or {}
     for item in evidence:
         if item.user_id != user_id or item.workspace_id != workspace_id:
             raise ValueError("Name correction evidence is outside the authorized scope")
@@ -247,9 +275,28 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         for scope in scopes:
             if not scope.new_name.strip() or any(not name for name in scope.old_names):
                 raise ValueError("Name correction names cannot be empty")
+            if correct_identity and item.memory_id == scope.memory_id and item.transcript_version == scope.transcript_version and not scope.contains(item):
+                match = re.fullmatch(r"(\d+):(\d+)(?:\.\.(\d+):(\d+))?", item.source_id)
+                overlapping = match and any(int(match[2]) <= index <= int(match[4] or match[2]) for index in scope.segment_indexes)
+                if overlapping or (not match and item.speaker_id in {scope.original_speaker_ref, *scope.previous_speaker_refs}):
+                    raise SpeakerIdentityScopeError("speaker evidence range cannot be reassigned without splitting its provenance")
             if scope.contains(item):
-                if scope.speaker_ref and item.speaker_id == scope.original_speaker_ref:
+                previous = {scope.original_speaker_ref, *scope.previous_speaker_refs}
+                if scope.speaker_ref and (item.speaker_id in previous or correct_identity):
                     speaker_ref = scope.speaker_ref
+                if correct_identity and speaker_ref != item.speaker_id:
+                    target = entity_refs.get(speaker_ref) or f"entity:{speaker_ref}"
+                    identities[item.evidence_id] = (previous_entity(item), target,
+                                                    scope.original_speaker_ref, speaker_ref, item.speaker_id)
+                    if speaker_ref not in entity_refs and target not in created_entities:
+                        created_entities.add(target)
+                        object_changes.append(ObjectMutation(logical_ref=target, operation="create",
+                            object_type="entity", evidence_ids=(item.evidence_id,), payload={
+                                "canonical_key": target, "title": scope.new_name,
+                                "valid_from": item.recorded_at,
+                                "confidence": 1 if scope.assignment_source == "manual" else 0,
+                                "attributes": {"speaker_ref": speaker_ref, "identity_scope": "user",
+                                               "identity_assignment_source": scope.assignment_source}}))
                 for old in scope.old_names:
                     if old in names and names[old] != scope.new_name:
                         raise ValueError("Ambiguous name correction scope")
@@ -280,6 +327,26 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
     def refs_for(refs):
         return tuple(dict.fromkeys(remap.get(ref, ref) for ref in refs))
 
+    def actor_for(refs, owner, *, field_key=None, current_actor=None, self_committed=False):
+        actors = [identities.get(ref) for ref in refs]
+        if not actors or not any(actors):
+            return None
+        # An explicit raw label is speaker-relative; a proper name is not.
+        if all(actor == actors[0] for actor in actors) and actors[0]:
+            old, target, label, speaker, previous = actors[0]
+            if old is not None and (owner in {label, speaker, previous} or self_committed):
+                return old, target
+            if not owner and field_key and current_actor == old and old is not None:
+                decision = identity_decisions.get(field_key)
+                if decision == "speaker":
+                    return old, target
+                if decision != "named_person":
+                    ambiguities.append({"field_key": field_key, "evidence_ids": list(refs),
+                                        "previous_speaker_ref": previous, "target_speaker_ref": speaker})
+        elif field_key and current_actor and any(actor and actor[0] == current_actor for actor in actors):
+            raise SpeakerIdentityScopeError("speaker-dependent actor has conflicting multi-source ownership")
+        return None
+
     def migrate_refs(value, key=""):
         if isinstance(value, dict):
             return {k: migrate_refs(v, k) for k, v in value.items()}
@@ -293,6 +360,12 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         refs = tuple(row["evidence_ids"])
         payload = dict(row["payload"])
         value = correct_display_fields(payload["value"], names_for(refs), text_value=True)
+        actor = actor_for(refs, payload["value"].get("owner_mention")
+                          if isinstance(payload["value"], dict) else None,
+                          field_key="assertion:" + row["assertion_id"],
+                          current_actor=payload.get("asserted_by_entity_id"))
+        if actor and payload.get("asserted_by_entity_id") == actor[0]:
+            payload["asserted_by_entity_id"] = actor[1]
         new_refs = refs_for(refs)
         if value == payload["value"] and new_refs == refs:
             continue
@@ -311,10 +384,22 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         new_refs = refs_for(refs)
         if new_refs == refs:
             continue
+        source, target = row["source_object_id"], row["target_object_id"]
+        actors = [identities.get(ref) for ref in refs]
+        if (row["relation_type"] == "participated_in" and actors and actors[0]
+                and all(actor == actors[0] for actor in actors) and source == actors[0][0]):
+            source = actors[0][1]
+        if row["relation_type"] in {"owned_by", "committed_by"}:
+            owner_object = next((obj for obj in objects if obj["object_id"] == source), None)
+            actor = actor_for(refs, owner_object["payload"].get("attributes", {}).get("owner_mention"),
+                              field_key="object:" + source, current_actor=target,
+                              self_committed=owner_object["payload"].get("attributes", {}).get("execution_intent") == "self_committed") if owner_object else None
+            if actor and target == actor[0]:
+                target = actor[1]
         new_id = _id("rel", operation_key, row["relation_id"])
         relation_changes.append(RelationMutation(
             logical_ref=new_id, relation_id=new_id, operation="create",
-            source_object_ref=row["source_object_id"], target_object_ref=row["target_object_id"],
+            source_object_ref=source, target_object_ref=target,
             relation_type=row["relation_type"], evidence_ids=new_refs, payload=row["payload"],
         ))
         retracts.append(RetractionMutation(logical_ref="ret:" + row["relation_id"],
@@ -328,6 +413,24 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         if row["object_type"] == "entity":
             names = {}
         after = migrate_refs(correct_display_fields(before, names))
+        actor = actor_for(refs, before.get("attributes", {}).get("owner_mention"),
+                          field_key="object:" + row["object_id"],
+                          current_actor=next((before.get(key) or before.get("attributes", {}).get(key)
+                                              for key in ("owner_entity_id", "committed_by", "decision_owner", "owner")
+                                              if before.get(key) or before.get("attributes", {}).get(key)), None),
+                          self_committed=before.get("attributes", {}).get("execution_intent") == "self_committed")
+        if actor:
+            for field in ("owner", "owner_entity_id", "committed_by", "decision_owner"):
+                if before.get(field) == actor[0]:
+                    after[field] = actor[1]
+            for field in ("owner", "owner_entity_id", "committed_by", "decision_owner"):
+                if before.get("attributes", {}).get(field) == actor[0]:
+                    after["attributes"] = {**after.get("attributes", {}), field: actor[1]}
+        if source_metadata and row["object_type"] == "meeting" and str(
+                before.get("external_memory_id", before.get("attributes", {}).get("external_memory_id"))) == str(
+                    source_metadata["memory_id"]):
+            after["attributes"] = {**after.get("attributes", {}),
+                                   **{k: v for k, v in source_metadata.items() if k != "memory_id"}}
         new_refs = refs_for(refs)
         patch = {key: value for key, value in after.items()
                  if key in ObjectMutationPayload.model_fields and value != before.get(key)}
@@ -341,13 +444,18 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             object_type=row["object_type"], object_id=row["object_id"],
             expected_version=row["lock_version"], evidence_ids=new_refs, payload=patch,
         ))
+    if ambiguities:
+        raise SpeakerIdentityAmbiguity(ambiguities)
     if not (creates or object_changes or assertion_changes or relation_changes):
         return None
+    object_changes = [mutation.model_copy(update={"evidence_ids": refs_for(mutation.evidence_ids)})
+                      if mutation.operation.value == "create" else mutation for mutation in object_changes]
     return MemoryPlanner().plan(MemoryChangeDraft(
         changeset_id=_id("chg", operation_key, "names"), user_id=user_id, workspace_id=workspace_id,
         source_ref=SourceRef(source_type="internal_correction", source_id=operation_key),
         base_state_version=base_state_version,
-        expected_object_versions={row.object_id: row.expected_version for row in object_changes},
+        expected_object_versions={row.object_id: row.expected_version for row in object_changes
+                                  if row.object_id is not None},
         evidence_creates=tuple(creates), object_mutations=tuple(object_changes),
         assertion_mutations=tuple(assertion_changes), relation_mutations=tuple(relation_changes),
         retractions=tuple(retracts), domain_events=(DomainEvent(

@@ -106,6 +106,9 @@ class GlobalAlignmentService:
             transcript_version=source.transcript_version,
             transcript_content_hash=source.transcript_content_hash,
             existing=context.meeting_object,
+            source_revision=source.source_revision,
+            hash_schema_version=source.hash_schema_version,
+            speaker_mapping_hash=source.speaker_mapping_hash,
         )
         meeting_ref = f"meeting:{source.memory_id}"
         meeting_mutation = ObjectMutation(
@@ -128,6 +131,9 @@ class GlobalAlignmentService:
                 "confidence": 1,
                 "attributes": {
                     "transcript_content_hash": source.transcript_content_hash,
+                    "source_revision": source.source_revision,
+                    "hash_schema_version": source.hash_schema_version,
+                    "speaker_mapping_hash": source.speaker_mapping_hash,
                     "extraction_completeness": "partial" if extraction_isolation_report(extraction.warnings) else "complete",
                     "extraction_isolation": extraction_isolation_report(extraction.warnings),
                 },
@@ -552,6 +558,7 @@ class GlobalAlignmentService:
                 changeset_id=(
                     f"changeset:memory:{source.memory_id}:"
                     f"transcript:{source.transcript_version}"
+                    f":source-revision:{source.source_revision}"
                 ),
                 user_id=source.user_id,
                 workspace_id=source.workspace_id,

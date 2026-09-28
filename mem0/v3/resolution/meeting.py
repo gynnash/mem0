@@ -18,6 +18,9 @@ class MeetingResolver:
         transcript_version: int,
         transcript_content_hash: Optional[str],
         existing: Optional[MeetingObjectState],
+        source_revision: int = 0,
+        hash_schema_version: int = 1,
+        speaker_mapping_hash: Optional[str] = None,
     ) -> Tuple[LifecycleOperation, Optional[str], Optional[int]]:
         expected_key = self.canonical_key(memory_id)
         if existing is None:
@@ -26,6 +29,15 @@ class MeetingResolver:
             raise ValueError("existing meeting binding violates deterministic identity")
         if transcript_version < existing.transcript_version:
             raise ValueError("older transcript version cannot replace current meeting state")
+        if transcript_version == existing.transcript_version:
+            if hash_schema_version != existing.hash_schema_version:
+                raise ValueError("transcript hash schema requires verified source migration")
+            if source_revision < existing.source_revision:
+                raise ValueError("older source revision cannot replace current meeting state")
+            if (source_revision == existing.source_revision
+                    and (hash_schema_version == 2 or (speaker_mapping_hash and existing.speaker_mapping_hash))
+                    and speaker_mapping_hash != existing.speaker_mapping_hash):
+                raise ValueError("speaker mapping changed without a new revision")
         if (
             transcript_version == existing.transcript_version
             and transcript_content_hash

@@ -67,6 +67,9 @@ class MeetingExtractionInput(FrozenContract):
     workspace_id: NonEmptyStr
     memory_id: NonEmptyStr
     transcript_version: int = Field(ge=1)
+    source_revision: int = Field(default=0, ge=0)
+    hash_schema_version: int = Field(default=1, ge=1, le=2)
+    speaker_mapping_hash: Optional[str] = None
     transcript_content_hash: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
