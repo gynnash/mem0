@@ -31,6 +31,7 @@ from mem0.v3.extraction import (
 )
 from mem0.v3.planner import MemoryChangeDraft, MemoryPlanner
 from mem0.v3.resolution.lifecycle import LifecycleResolver
+from mem0.v3.resolution.action import reconcile_action
 from mem0.v3.resolution.entity import EntityResolver
 from mem0.v3.resolution.meeting import MeetingResolver
 from mem0.v3.resolution.models import (
@@ -99,6 +100,11 @@ class GlobalAlignmentService:
         evidence_creates, evidence_by_episode = self._build_evidence(
             source, extraction
         )
+        segments_by_id = {item.segment_id: item for item in source.segments}
+        speakers_by_episode = {
+            item.evidence_id: {segments_by_id[span.segment_id].speaker_ref for span in item.source_spans}
+            for item in extraction.episodic_evidence
+        }
         all_evidence_refs = tuple(item.logical_ref for item in evidence_creates)
         meeting_evidence = all_evidence_refs
         meeting_operation, meeting_id, meeting_version = self._meeting_resolver.resolve(
@@ -152,6 +158,7 @@ class GlobalAlignmentService:
         participant_entity_refs = {}
         project_refs_by_mention = {}
         participant_evidence = self._participant_evidence_refs(
+            source=source,
             extraction=extraction,
             evidence_by_episode=evidence_by_episode,
         )
@@ -352,6 +359,17 @@ class GlobalAlignmentService:
             owner_ref = entity_refs_by_mention.get(
                 _normalized(claim.owner_mention)
             )
+            cited_speakers = {
+                speaker for evidence_id in claim.episodic_evidence_ids
+                for speaker in speakers_by_episode[evidence_id]
+            }
+            if claim.asserted_by_speaker_ref is not None and claim.asserted_by_speaker_ref not in cited_speakers:
+                raise ValueError("claim speaker is outside cited source")
+            asserted_by_ref = participant_entity_refs.get(_normalized(claim.asserted_by_speaker_ref))
+            initiator_ref = entity_refs_by_mention.get(_normalized(claim.initiator_mention))
+            role_speakers = {_normalized(ref): ref for ref in source.participant_refs}
+            owner_speaker_ref = role_speakers.get(_normalized(claim.owner_mention))
+            initiator_speaker_ref = role_speakers.get(_normalized(claim.initiator_mention))
             assertion_ref = f"assertion:{source.memory_id}:{claim.claim_id}"
             if claim.claim_type is ClaimType.CONDITION:
                 assertion_mutations.append(
@@ -361,7 +379,11 @@ class GlobalAlignmentService:
                         claim=claim,
                         evidence_ids=claim_evidence,
                         asserted_at=source.started_at,
-                        asserted_by_entity_id=owner_ref,
+                        asserted_by_entity_id=asserted_by_ref,
+                        initiator_ref=initiator_ref,
+                        owner_ref=owner_ref,
+                        owner_speaker_ref=owner_speaker_ref,
+                        initiator_speaker_ref=initiator_speaker_ref,
                     )
                 )
                 continue
@@ -382,11 +404,28 @@ class GlobalAlignmentService:
                 ),
                 evidence_ids=claim_evidence,
                 owner_ref=owner_ref,
+                initiator_ref=initiator_ref,
+                owner_speaker_ref=owner_speaker_ref,
+                initiator_speaker_ref=initiator_speaker_ref,
             )
+            action_conflict = False
+            if candidate is not None and claim.claim_type in {ClaimType.TASK, ClaimType.COMMITMENT}:
+                payload, action_conflict, role_warnings = reconcile_action(
+                    existing=candidate, claim=claim, proposed=payload, assertion_ref=assertion_ref,
+                )
+                alignment_warnings.extend(role_warnings)
             payload, lock_warnings = self._lifecycle_resolver.protect_user_locked_fields(
                 existing=candidate,
                 proposed=payload,
             )
+            owner_field = "committed_by" if claim.claim_type is ClaimType.COMMITMENT else "owner_entity_id"
+            owner_locked = f"user_locked_field_preserved:{owner_field}" in lock_warnings
+            if owner_locked:
+                payload["attributes"].pop("owner_mention", None)
+                payload["field_provenance"] = tuple(
+                    item for item in payload["field_provenance"]
+                    if not isinstance(item, FieldProvenance) or item.field_name != "owner_mention"
+                )
             alignment_warnings.extend(lock_warnings)
             operation = self._lifecycle_resolver.resolve(
                 existing=candidate,
@@ -398,7 +437,7 @@ class GlobalAlignmentService:
                     claim.lifecycle_signal is ClaimLifecycleSignal.SUPERSEDES
                 ),
                 resolved=(
-                    claim.lifecycle_signal is ClaimLifecycleSignal.RESOLVED
+                    claim.lifecycle_signal is ClaimLifecycleSignal.RESOLVED and not action_conflict
                 ),
                 reopen=(
                     claim.lifecycle_signal is ClaimLifecycleSignal.REOPENED
@@ -411,7 +450,11 @@ class GlobalAlignmentService:
                     claim=claim,
                     evidence_ids=claim_evidence,
                     asserted_at=source.started_at,
-                    asserted_by_entity_id=owner_ref,
+                    asserted_by_entity_id=asserted_by_ref,
+                    initiator_ref=initiator_ref,
+                    owner_ref=owner_ref,
+                    owner_speaker_ref=owner_speaker_ref,
+                    initiator_speaker_ref=initiator_speaker_ref,
                 )
             )
             mutation_payload = payload
@@ -455,7 +498,11 @@ class GlobalAlignmentService:
                     epistemic_type=EpistemicType.OBSERVED,
                 )
             )
-            if owner_ref is not None:
+            if owner_ref is not None and not owner_locked and not (
+                claim.claim_type in {ClaimType.TASK, ClaimType.COMMITMENT} and claim.negated
+            ) and not action_conflict and (
+                candidate is None or "owner_mention" in payload.get("attributes", {})
+            ):
                 relation_type = (
                     "committed_by"
                     if claim.claim_type is ClaimType.COMMITMENT
@@ -603,7 +650,8 @@ class GlobalAlignmentService:
 
     @staticmethod
     def _claim_payload(
-        *, source, claim, canonical_key, evidence_ids, owner_ref=None
+        *, source, claim, canonical_key, evidence_ids, owner_ref=None, initiator_ref=None,
+        owner_speaker_ref=None, initiator_speaker_ref=None
     ):
         payload = {
             "canonical_key": canonical_key,
@@ -623,6 +671,28 @@ class GlobalAlignmentService:
                 FieldProvenance(field_name="title", evidence_ids=evidence_ids),
             ),
         }
+        if claim.claim_type in {ClaimType.TASK, ClaimType.COMMITMENT}:
+            payload["attributes"].update({
+                "initiator_mention": claim.initiator_mention,
+                "initiator_entity_id": initiator_ref,
+                "initiator_speaker_ref": initiator_speaker_ref,
+                "initiator_evidence_ids": evidence_ids if claim.initiator_mention else (),
+                "owner_speaker_ref": owner_speaker_ref,
+                "owner_evidence_ids": evidence_ids if claim.owner_mention else (),
+                "execution_intent": claim.task_intent.value if claim.task_intent else None,
+            })
+            role_fields = {"action": claim.action, "initiator_mention": claim.initiator_mention,
+                           "initiator_entity_id": initiator_ref, "owner_mention": claim.owner_mention,
+                           "execution_intent": claim.task_intent}
+            role_fields.update({key: payload["attributes"][key] for key in (
+                "owner_speaker_ref", "owner_evidence_ids", "initiator_speaker_ref", "initiator_evidence_ids",
+            )})
+            role_fields["committed_by" if claim.claim_type is ClaimType.COMMITMENT else "owner_entity_id"] = owner_ref
+            payload["field_provenance"] += tuple(
+                FieldProvenance(field_name=field, evidence_ids=evidence_ids)
+                for field, value in role_fields.items() if value is not None
+            )
+        commitment_supported = not claim.negated and claim.modality.value in {"promised", "planned", "conditional"}
         if claim.claim_type is ClaimType.DECISION:
             payload.update(
                 {
@@ -639,19 +709,19 @@ class GlobalAlignmentService:
             payload.update(
                 {
                     "committed_by": owner_ref or "unresolved",
-                    "action": claim.text,
+                    "action": claim.action or claim.text,
                     "committed_at": source.started_at,
                     "due_at": claim.due_at,
                     "fulfillment_status": (
                         FulfillmentStatus.COMPLETED
                         if is_completed
-                        else FulfillmentStatus.OPEN
+                        else (FulfillmentStatus.OPEN if commitment_supported else FulfillmentStatus.UNKNOWN_NO_EVIDENCE)
                     ),
                     "completion_evidence_ids": (
                         evidence_ids if is_completed else ()
                     ),
                     "workflow_status": (
-                        "completed" if is_completed else "in_progress"
+                        "completed" if is_completed else ("accepted" if commitment_supported else "proposed")
                     ),
                 }
             )
@@ -663,12 +733,15 @@ class GlobalAlignmentService:
                 {
                     "action": claim.action,
                     "owner_entity_id": owner_ref,
-                    "execution_intent": claim.task_intent.value,
                     "due_at": claim.due_at,
+                    "completion_evidence_ids": evidence_ids if is_completed else (),
                 }
             )
             payload["workflow_status"] = (
-                "completed" if is_completed else "in_progress"
+                "completed" if is_completed else (
+                    "accepted" if commitment_supported and claim.task_intent is not None and claim.task_intent.value == "self_committed"
+                    else "proposed"
+                )
             )
         elif claim.claim_type in {ClaimType.BLOCKER, ClaimType.OBJECTION}:
             payload.update(
@@ -704,6 +777,10 @@ class GlobalAlignmentService:
         evidence_ids,
         asserted_at,
         asserted_by_entity_id,
+        initiator_ref=None,
+        owner_ref=None,
+        owner_speaker_ref=None,
+        initiator_speaker_ref=None,
     ):
         return AssertionMutation(
             logical_ref=logical_ref,
@@ -716,6 +793,16 @@ class GlobalAlignmentService:
                     "text": claim.text,
                     "condition": claim.condition,
                     "owner_mention": claim.owner_mention,
+                    "owner_entity_id": owner_ref,
+                    "owner_speaker_ref": owner_speaker_ref,
+                    "owner_evidence_ids": evidence_ids if claim.owner_mention else (),
+                    "asserted_by_speaker_ref": claim.asserted_by_speaker_ref,
+                    "initiator_mention": claim.initiator_mention,
+                    "initiator_entity_id": initiator_ref,
+                    "initiator_speaker_ref": initiator_speaker_ref,
+                    "initiator_evidence_ids": evidence_ids if claim.initiator_mention else (),
+                    "action": claim.action,
+                    "task_intent": claim.task_intent.value if claim.task_intent else None,
                     "due_at": (
                         claim.due_at.isoformat()
                         if claim.due_at is not None
@@ -895,8 +982,9 @@ class GlobalAlignmentService:
         )
 
     @classmethod
-    def _participant_evidence_refs(cls, *, extraction, evidence_by_episode):
+    def _participant_evidence_refs(cls, *, source, extraction, evidence_by_episode):
         evidence_by_participant = {}
+        segments = {item.segment_id: item for item in source.segments}
 
         def add(mention, episode_ids):
             normalized = _normalized(mention)
@@ -910,7 +998,8 @@ class GlobalAlignmentService:
                     values.append(evidence_ref)
 
         for episode in extraction.episodic_evidence:
-            add(episode.primary_speaker_ref, (episode.evidence_id,))
+            for span in episode.source_spans:
+                add(segments[span.segment_id].speaker_ref, (episode.evidence_id,))
         return {
             key: tuple(values)
             for key, values in evidence_by_participant.items()

@@ -40,12 +40,34 @@ semantic item must cite one or more episodic_evidence_ids emitted in the same re
 never cite transcript evidence_unit_ids directly. Extract person and project mentions as
 written in the supported local context and do not resolve identities or aliases here.
 
-Preserve negation, uncertainty, modality, owner, and deadline. Emit a task only when the
-transcript explicitly assigns an executable action to a named participant or the speaker
-explicitly commits to perform it. For every task, return a concise action, the exact
-owner_mention, and task_intent=assigned or self_committed; use only promised, planned, or
-conditional modality. For every non-task claim, omit action and task_intent. Product
-demonstrations, examples, descriptions of existing task
-lists, generic process explanations, hypothetical actions, and past actions are not tasks.
-Do not resolve identities, projects, topics, or lifecycle here. Return the requested
-structured schema only."""
+Preserve negation, uncertainty, modality, owner, and deadline. For action-related claims,
+distinguish the person making the statement, the person initiating the action, and the
+person expected to perform it. These roles may belong to different people. Use
+asserted_by_speaker_ref for the source speaker making the statement, initiator_mention
+for the person making the request or assignment, and owner_mention for the executor.
+Resolve roles from the relevant conversational context. Do not infer responsibility
+from speaking, participation, or association with the subject alone. Leave unsupported
+or ambiguous roles null. Copy speaker references exactly from the cited transcript;
+include supported named role mentions in entity_mentions without resolving global identities.
+
+Emit a task for a concrete executable action requested, assigned, or personally committed
+in the source. Return a concise action and task_intent=requested, assigned, or
+self_committed only when supported; otherwise leave task_intent null. A request or
+assignment does not establish the executor's acceptance or personal commitment. Emit
+a commitment only when the source establishes a personal commitment; action and
+task_intent=self_committed may also describe that commitment. Preserve whether a claim
+is directly stated or reported about someone else, including uncertainty and conditions.
+The source speaker remains the person making the statement even when reporting another
+person's commitment. For claims other than tasks or commitments, omit action,
+task_intent, and initiator_mention.
+
+Treat completion as a separate lifecycle signal. Use lifecycle_signal=resolved only
+when the cited source establishes completion, not merely intention or expectation.
+Preserve subsequent corrections and changes as separately supported claims. New
+requests do not withdraw or replace an existing commitment. Use lifecycle_signal=supersedes
+only for an explicitly supported replacement of an earlier action or responsibility;
+mere repetition, clarification, or a new request does not establish reassignment. Product
+demonstrations, generic examples, existing task-list descriptions, and hypothetical
+actions do not establish real tasks or completion. Support each claim and its role
+attribution with the cited source. Do not resolve global identities, projects, topics,
+or canonical-object lifecycle here. Return fields declared in the supplied schema only."""

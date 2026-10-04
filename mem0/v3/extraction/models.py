@@ -36,6 +36,7 @@ class ClaimModality(str, Enum):
 
 
 class TaskExecutionIntent(str, Enum):
+    REQUESTED = "requested"
     ASSIGNED = "assigned"
     SELF_COMMITTED = "self_committed"
 
@@ -155,6 +156,8 @@ class UnitBackedExtractedClaim(FrozenContract):
     claim_id: NonEmptyStr
     claim_type: ClaimType
     text: NonEmptyStr
+    asserted_by_speaker_ref: Optional[NonEmptyStr] = None
+    initiator_mention: Optional[NonEmptyStr] = None
     owner_mention: Optional[NonEmptyStr] = None
     action: Optional[NonEmptyStr] = None
     task_intent: Optional[TaskExecutionIntent] = None
@@ -209,6 +212,8 @@ class ExtractedClaim(FrozenContract):
     claim_id: NonEmptyStr
     claim_type: ClaimType
     text: NonEmptyStr
+    asserted_by_speaker_ref: Optional[NonEmptyStr] = None
+    initiator_mention: Optional[NonEmptyStr] = None
     owner_mention: Optional[NonEmptyStr] = None
     action: Optional[NonEmptyStr] = None
     task_intent: Optional[TaskExecutionIntent] = None
@@ -234,22 +239,18 @@ class ExtractedClaim(FrozenContract):
 
 
 def _validate_task_fields(claim) -> None:
-    task_fields = (claim.action, claim.task_intent)
-    if claim.claim_type is ClaimType.TASK:
-        if claim.owner_mention is None or any(value is None for value in task_fields):
-            raise ValueError(
-                "task claim requires owner_mention, action and task_intent"
-            )
-        if claim.modality not in {
-            ClaimModality.PROMISED,
-            ClaimModality.PLANNED,
-            ClaimModality.CONDITIONAL,
-        }:
-            raise ValueError(
-                "task claim requires promised, planned or conditional modality"
-            )
-    elif any(value is not None for value in task_fields):
-        raise ValueError("action and task_intent are only valid for task claims")
+    if claim.claim_type in {ClaimType.TASK, ClaimType.COMMITMENT} and claim.negated and claim.lifecycle_signal is ClaimLifecycleSignal.RESOLVED:
+        raise ValueError("negated action claims cannot establish completion")
+    if claim.claim_type is ClaimType.TASK and claim.action is None:
+        raise ValueError("task claim requires action")
+    if claim.claim_type is ClaimType.COMMITMENT and claim.task_intent in {
+        TaskExecutionIntent.REQUESTED, TaskExecutionIntent.ASSIGNED,
+    }:
+        raise ValueError("a request or assignment is not a commitment")
+    if claim.claim_type not in {ClaimType.TASK, ClaimType.COMMITMENT} and any(
+        value is not None for value in (claim.action, claim.task_intent, claim.initiator_mention)
+    ):
+        raise ValueError("action, task_intent and initiator_mention are only valid for task or commitment claims")
 
 
 class SessionTopicCandidate(FrozenContract):

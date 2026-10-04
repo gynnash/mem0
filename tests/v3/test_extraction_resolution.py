@@ -394,7 +394,7 @@ def test_alignment_persists_resolved_task_action_owner_and_intent():
     assert mutation.payload.attributes["action"] == "Send the proposal"
     assert mutation.payload.attributes["owner_entity_id"]
     assert mutation.payload.attributes["execution_intent"] == "self_committed"
-    assert mutation.payload.workflow_status.value == "in_progress"
+    assert mutation.payload.workflow_status.value == "accepted"
 
 
 def test_project_resolution_requires_reliable_anchor_threshold_and_margin():

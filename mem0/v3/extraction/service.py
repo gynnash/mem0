@@ -100,6 +100,7 @@ class LocalExtractionService:
             metadata={
                 "memory_id": source.memory_id,
                 "transcript_version": source.transcript_version,
+                "prompt_version": "local-extraction/roles-v2",
             },
         )
         raw = self._model.generate_structured(
@@ -144,6 +145,12 @@ class LocalExtractionService:
                 if not set(item.episodic_evidence_ids).issubset(allowed):
                     warnings.append(isolation_warning(field, index,
                         getattr(item, "claim_id", getattr(item, "candidate_id", None)), "missing_or_ambiguous_support"))
+                elif field == "claims" and item.asserted_by_speaker_ref is not None and item.asserted_by_speaker_ref not in {
+                    evidence_units[unit_id].speaker_ref
+                    for evidence_id in item.episodic_evidence_ids
+                    for unit_id in by_id[evidence_id].evidence_unit_ids
+                }:
+                    warnings.append(isolation_warning(field, index, item.claim_id, "speaker_outside_source"))
                 else:
                     items.append(item)
             updates[field] = tuple(items)

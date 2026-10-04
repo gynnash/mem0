@@ -43,6 +43,10 @@ class LifecycleResolver:
             if field_name in cleaned and cleaned[field_name] != current.get(field_name):
                 cleaned.pop(field_name)
                 warnings.append(f"user_locked_field_preserved:{field_name}")
+            if field_name in (cleaned.get("attributes") or {}) and cleaned["attributes"][field_name] != current.get(field_name):
+                cleaned["attributes"] = dict(cleaned["attributes"])
+                cleaned["attributes"].pop(field_name)
+                warnings.append(f"user_locked_field_preserved:{field_name}")
         proposed_provenance = tuple(cleaned.get("field_provenance") or ())
         cleaned["field_provenance"] = tuple(
             item

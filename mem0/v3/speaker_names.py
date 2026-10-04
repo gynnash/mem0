@@ -12,6 +12,7 @@ from mem0.v3.contracts import (
     ObjectMutationPayload, RelationMutation, RetractionMutation, SourceRef,
 )
 from mem0.v3.domain import Evidence
+from mem0.v3.action_roles import ACTION_ROLES, ROLE_ENTITY_FIELDS, ROLE_SPEAKER_FIELDS, ROLE_EVIDENCE_FIELDS, ROLE_MENTION_FIELDS
 from mem0.v3.planner import MemoryChangeDraft, MemoryPlanner
 
 
@@ -57,8 +58,10 @@ def plan_person_identity_merge(*, operation_key, user_id, workspace_id, base_sta
     identity_fields = {"subject_object_id", "subject_object_ref", "asserted_by_entity_id", "owner",
                        "committed_by", "committed_to", "decision_owner", "source_object_id", "target_object_id",
                        "entity_id", "entity_ids", "object_id", "object_ids", "participant_ids"}
+    identity_fields |= ROLE_ENTITY_FIELDS
     evidence_fields = {"evidence_id", "evidence_ids", "completion_evidence_ids", "resolution_evidence_ids",
                        "source_evidence_id", "source_evidence_ids", "evidence_refs"}
+    evidence_fields |= ROLE_EVIDENCE_FIELDS
     def migrate(value, key=""):
         if isinstance(value, dict):
             return {k: migrate(v, k) for k, v in value.items()}
@@ -69,7 +72,7 @@ def plan_person_identity_merge(*, operation_key, user_id, workspace_id, base_sta
                 return identity_map.get(value, value)
             if key in evidence_fields:
                 return evidence_map.get(value, value)
-            if key in {"speaker_ref", "speaker_id", "participant_refs"} and value in source_refs:
+            if key in {"speaker_ref", "speaker_id", "participant_refs"} | ROLE_SPEAKER_FIELDS | ROLE_MENTION_FIELDS and value in source_refs:
                 return target_ref
         if key in {"speaker_id", "person_id", "owner_id"} and str(value) in {str(item) for item in source_speaker_ids}:
             return str(target_speaker_id) if isinstance(value, str) else target_speaker_id
@@ -327,21 +330,23 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
     def refs_for(refs):
         return tuple(dict.fromkeys(remap.get(ref, ref) for ref in refs))
 
-    def actor_for(refs, owner, *, field_key=None, current_actor=None, self_committed=False):
+    def actor_for(refs, owner, *, field_key=None, current_actor=None):
         actors = [identities.get(ref) for ref in refs]
         if not actors or not any(actors):
             return None
         # An explicit raw label is speaker-relative; a proper name is not.
         if all(actor == actors[0] for actor in actors) and actors[0]:
             old, target, label, speaker, previous = actors[0]
-            if old is not None and (owner in {label, speaker, previous} or self_committed):
+            if old is not None and owner in {label, speaker, previous}:
                 return old, target
             if not owner and field_key and current_actor == old and old is not None:
                 decision = identity_decisions.get(field_key)
                 if decision == "speaker":
                     return old, target
                 if decision != "named_person":
-                    ambiguities.append({"field_key": field_key, "evidence_ids": list(refs),
+                    base_key, _, role = field_key.partition("#")
+                    ambiguities.append({"field_key": field_key, "value_key": base_key, "role": role or "actor",
+                                        "evidence_ids": list(refs),
                                         "previous_speaker_ref": previous, "target_speaker_ref": speaker})
         elif field_key and current_actor and any(actor and actor[0] == current_actor for actor in actors):
             raise SpeakerIdentityScopeError("speaker-dependent actor has conflicting multi-source ownership")
@@ -352,22 +357,43 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             return {k: migrate_refs(v, k) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
             return [migrate_refs(v, key) for v in value]
-        if isinstance(value, str) and key in {"evidence_id", "evidence_ids", "completion_evidence_ids", "resolution_evidence_ids"}:
+        if isinstance(value, str) and key in {"evidence_id", "evidence_ids", "completion_evidence_ids", "resolution_evidence_ids"} | ROLE_EVIDENCE_FIELDS:
             return remap.get(value, value)
         return value
+
+    def correct_action_roles(value, refs, field_key, *, executor_field="owner_entity_id"):
+        corrected = dict(value)
+        for role, (mention, speaker, entity, evidence_field) in ACTION_ROLES.items():
+            entity = executor_field if role == "executor" else entity
+            role_refs = tuple(value.get(evidence_field) or refs)
+            actor = actor_for(role_refs, value.get(speaker) or value.get(mention),
+                              field_key=field_key + "#" + role, current_actor=value.get(entity))
+            if actor and value.get(entity) == actor[0]:
+                corrected[entity] = actor[1]
+                corrected[speaker] = identities[role_refs[0]][3]
+                if value.get(mention) in identities[role_refs[0]][2:]:
+                    corrected[mention] = corrected[speaker]
+        return migrate_refs(corrected)
 
     for row in assertions:
         refs = tuple(row["evidence_ids"])
         payload = dict(row["payload"])
-        value = correct_display_fields(payload["value"], names_for(refs), text_value=True)
-        actor = actor_for(refs, payload["value"].get("owner_mention")
-                          if isinstance(payload["value"], dict) else None,
-                          field_key="assertion:" + row["assertion_id"],
+        original_value = payload["value"]
+        value = correct_display_fields(original_value, names_for(refs), text_value=True)
+        reporter = (original_value.get("asserted_by_speaker_ref") if "asserted_by_speaker_ref" in original_value
+                    else original_value.get("owner_mention")) if isinstance(original_value, dict) else None
+        actor = actor_for(refs, reporter,
+                          field_key="assertion:" + row["assertion_id"] + (
+                              "#reporter" if isinstance(original_value, dict) and "asserted_by_speaker_ref" in original_value else ""),
                           current_actor=payload.get("asserted_by_entity_id"))
         if actor and payload.get("asserted_by_entity_id") == actor[0]:
             payload["asserted_by_entity_id"] = actor[1]
+            if isinstance(value, dict) and "asserted_by_speaker_ref" in value:
+                value["asserted_by_speaker_ref"] = identities[refs[0]][3]
+        if isinstance(value, dict):
+            value = correct_action_roles(value, refs, "assertion:" + row["assertion_id"])
         new_refs = refs_for(refs)
-        if value == payload["value"] and new_refs == refs:
+        if value == payload["value"] and new_refs == refs and payload == row["payload"]:
             continue
         payload["value"] = value
         new_id = _id("ast", operation_key, row["assertion_id"])
@@ -391,9 +417,10 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             source = actors[0][1]
         if row["relation_type"] in {"owned_by", "committed_by"}:
             owner_object = next((obj for obj in objects if obj["object_id"] == source), None)
-            actor = actor_for(refs, owner_object["payload"].get("attributes", {}).get("owner_mention"),
-                              field_key="object:" + source, current_actor=target,
-                              self_committed=owner_object["payload"].get("attributes", {}).get("execution_intent") == "self_committed") if owner_object else None
+            owner_attrs = owner_object["payload"].get("attributes", {}) if owner_object else {}
+            owner_refs = tuple(owner_attrs.get("owner_evidence_ids") or refs)
+            actor = actor_for(owner_refs, owner_attrs.get("owner_speaker_ref") or owner_attrs.get("owner_mention"),
+                              field_key="object:" + source + "#executor", current_actor=target) if owner_object else None
             if actor and target == actor[0]:
                 target = actor[1]
         new_id = _id("rel", operation_key, row["relation_id"])
@@ -413,12 +440,12 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         if row["object_type"] == "entity":
             names = {}
         after = migrate_refs(correct_display_fields(before, names))
-        actor = actor_for(refs, before.get("attributes", {}).get("owner_mention"),
-                          field_key="object:" + row["object_id"],
+        actor = actor_for(tuple(before.get("attributes", {}).get("owner_evidence_ids") or refs),
+                          before.get("attributes", {}).get("owner_speaker_ref") or before.get("attributes", {}).get("owner_mention"),
+                          field_key="object:" + row["object_id"] + "#executor",
                           current_actor=next((before.get(key) or before.get("attributes", {}).get(key)
                                               for key in ("owner_entity_id", "committed_by", "decision_owner", "owner")
-                                              if before.get(key) or before.get("attributes", {}).get(key)), None),
-                          self_committed=before.get("attributes", {}).get("execution_intent") == "self_committed")
+                                              if before.get(key) or before.get("attributes", {}).get(key)), None))
         if actor:
             for field in ("owner", "owner_entity_id", "committed_by", "decision_owner"):
                 if before.get(field) == actor[0]:
@@ -426,6 +453,17 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             for field in ("owner", "owner_entity_id", "committed_by", "decision_owner"):
                 if before.get("attributes", {}).get(field) == actor[0]:
                     after["attributes"] = {**after.get("attributes", {}), field: actor[1]}
+        if before.get("attributes"):
+            role_values = {**before.get("attributes", {}), **{
+                key: before[key] for key in ("committed_by",) if key in before
+            }}
+            corrected_roles = correct_action_roles(role_values, refs, "object:" + row["object_id"],
+                executor_field="committed_by" if row["object_type"] == "commitment" else "owner_entity_id")
+            after["attributes"] = {**after.get("attributes", {}), **{
+                key: val for key, val in corrected_roles.items() if val != role_values.get(key)
+            }}
+            if "committed_by" in before and corrected_roles.get("committed_by") != before["committed_by"]:
+                after["committed_by"] = corrected_roles["committed_by"]
         if source_metadata and row["object_type"] == "meeting" and str(
                 before.get("external_memory_id", before.get("attributes", {}).get("external_memory_id"))) == str(
                     source_metadata["memory_id"]):
