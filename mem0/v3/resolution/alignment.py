@@ -9,6 +9,7 @@ from mem0.v3.contracts import (
     EvidenceCreate,
     ObjectMutation,
     RelationMutation,
+    RetractionMutation,
     SourceRef,
     ValidatedMemoryChangeSet,
 )
@@ -20,6 +21,7 @@ from mem0.v3.domain import (
     LifecycleOperation,
     MemoryObjectType,
     Polarity,
+    RetractionTargetType,
 )
 from mem0.v3.extraction.models import extraction_isolation_report
 from mem0.v3.extraction import (
@@ -100,6 +102,7 @@ class GlobalAlignmentService:
         evidence_creates, evidence_by_episode = self._build_evidence(
             source, extraction
         )
+        retractions = []
         segments_by_id = {item.segment_id: item for item in source.segments}
         speakers_by_episode = {
             item.evidence_id: {segments_by_id[span.segment_id].speaker_ref for span in item.source_spans}
@@ -310,17 +313,41 @@ class GlobalAlignmentService:
             if decision.decision is ProjectLinkStatus.LINKED:
                 project_ref = decision.primary_project_object_id
             elif not candidates and mention.confidence >= 0.95:
-                project_ref = f"project:{_stable_token(normalized_mention)}"
+                project_ref = self.project_canonical_key(mention.mention)
+                identity = context.project_identities_by_mention.get(mention.mention)
+                operation = LifecycleOperation.CREATE
+                if identity is not None:
+                    if (identity.user_id != source.user_id or identity.workspace_id != source.workspace_id
+                            or identity.canonical_key != project_ref):
+                        raise ValueError("project identity does not match source scope or canonical key")
+                    if (identity.validity not in {"active", "retracted"}
+                            or identity.retention_status in {"deleted", "forgotten"}):
+                        alignment_warnings.append("project_identity_not_reopenable")
+                        continue
+                    operation = LifecycleOperation.REOPEN if identity.validity == "retracted" else LifecycleOperation.CONFIRM
+                    if operation is LifecycleOperation.REOPEN:
+                        for target_type, target_ids in ((RetractionTargetType.ASSERTION, identity.assertion_ids),
+                                                       (RetractionTargetType.RELATION, identity.relation_ids)):
+                            for target_id in target_ids:
+                                retractions.append(RetractionMutation(
+                                    logical_ref=f"project-reopen:{target_type.value}:{target_id}",
+                                    target_type=target_type, target_id=target_id,
+                                    reason="project_reestablished_from_new_evidence", evidence_ids=mention_evidence,
+                                ))
+                        domain_events.append(DomainEvent(event_type="memory.dependencies_invalidated",
+                            aggregate_ref=project_ref, payload={"reason": "project_identity_reopened"}))
                 object_mutations.append(
                     ObjectMutation(
                         logical_ref=project_ref,
-                        operation=LifecycleOperation.CREATE,
+                        operation=operation,
+                        object_id=identity.object_id if identity is not None else None,
+                        expected_version=identity.lock_version if identity is not None else None,
                         object_type=MemoryObjectType.PROJECT,
                         evidence_ids=mention_evidence,
                         payload={
                             "canonical_key": project_ref,
                             "title": mention.mention,
-                            "valid_from": source.started_at,
+                            **({"valid_from": source.started_at} if operation is not LifecycleOperation.CONFIRM else {}),
                             "confidence": mention.confidence,
                             "attributes": {
                                 "identity_aliases": (mention.mention,),
@@ -621,10 +648,15 @@ class GlobalAlignmentService:
                 object_mutations=tuple(object_mutations),
                 assertion_mutations=tuple(assertion_mutations),
                 relation_mutations=tuple(relation_mutations),
+                retractions=tuple({item.logical_ref: item for item in retractions}.values()),
                 domain_events=tuple(domain_events),
                 warnings=tuple(alignment_warnings),
             )
         )
+
+    @staticmethod
+    def project_canonical_key(mention: str) -> str:
+        return f"project:{_stable_token(_normalized(mention))}"
 
     @staticmethod
     def _select_object_candidate(

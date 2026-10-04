@@ -156,3 +156,21 @@ class AlignmentContext(FrozenContract):
         default_factory=dict
     )
     now: datetime
+    project_identities_by_mention: dict[str, "ProjectIdentity"] = Field(default_factory=dict)
+
+
+class ProjectIdentity(FrozenContract):
+    """Reserved identity metadata only; inactive state is never factual context."""
+
+    user_id: NonEmptyStr
+    workspace_id: NonEmptyStr
+    object_id: NonEmptyStr
+    canonical_key: NonEmptyStr
+    lock_version: int = Field(ge=0)
+    validity: str
+    retention_status: str = "working"
+    assertion_ids: tuple[NonEmptyStr, ...] = ()
+    relation_ids: tuple[NonEmptyStr, ...] = ()
+
+
+AlignmentContext.model_rebuild()
