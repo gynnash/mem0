@@ -3,7 +3,7 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import Dict
+from typing import Callable, Dict
 
 from mem0.v3.extraction.models import (
     EpisodicEvidence,
@@ -36,7 +36,13 @@ class NoUsableEvidenceError(ExtractionValidationError):
 
 
 MAX_EVIDENCE_UNIT_CHARS = 240
-EVIDENCE_UNIT_BOUNDARY_RE = re.compile(r"[。！？!?；;，,\n]+")
+LEGACY_EVIDENCE_UNITIZATION_VERSION = "evidence-units/v1"
+EVIDENCE_UNITIZATION_VERSION = "evidence-units/v2"
+EVIDENCE_UNIT_BOUNDARY_RE = re.compile(r"[。！？!?；;\n]+")
+_EVIDENCE_UNIT_BOUNDARIES = {
+    LEGACY_EVIDENCE_UNITIZATION_VERSION: re.compile(r"[。！？!?；;，,\n]+"),
+    EVIDENCE_UNITIZATION_VERSION: EVIDENCE_UNIT_BOUNDARY_RE,
+}
 
 
 @dataclass(frozen=True)
@@ -48,12 +54,16 @@ class _MaterializedEvidenceUnit:
 
 
 class LocalExtractionService:
-    def __init__(self, model: ModelPort, *, timeout_ms: int = 60_000) -> None:
+    def __init__(self, model: ModelPort, *, timeout_ms: int = 60_000,
+                 unitization_version_resolver: Callable[[MeetingExtractionInput], str] | None = None) -> None:
         self._model = model
         self._timeout_ms = timeout_ms
+        self._unitization_version_resolver = unitization_version_resolver
 
     def extract(self, source: MeetingExtractionInput) -> LocalExtractionResult:
-        evidence_units = self._split_transcript(source.segments)
+        unitization_version = (self._unitization_version_resolver(source)
+                               if self._unitization_version_resolver else EVIDENCE_UNITIZATION_VERSION)
+        evidence_units = self._split_transcript(source.segments, unitization_version=unitization_version)
         transcript = [
             {
                 "segment_id": segment.segment_id,
@@ -100,7 +110,8 @@ class LocalExtractionService:
             metadata={
                 "memory_id": source.memory_id,
                 "transcript_version": source.transcript_version,
-                "prompt_version": "local-extraction/roles-v2",
+                "prompt_version": "local-extraction/roles-v3",
+                "evidence_unitization_version": unitization_version,
             },
         )
         raw = self._model.generate_structured(
@@ -208,21 +219,24 @@ class LocalExtractionService:
 
     @classmethod
     def _split_transcript(
-        cls, segments: tuple[TranscriptSegment, ...]
+        cls, segments: tuple[TranscriptSegment, ...], *,
+        unitization_version: str = EVIDENCE_UNITIZATION_VERSION,
     ) -> Dict[str, _MaterializedEvidenceUnit]:
         units = {}
         for segment in segments:
-            for item in cls._split_segment(segment):
+            for item in cls._split_segment(segment, unitization_version=unitization_version):
                 units[item.unit.evidence_unit_id] = item
         return units
 
     @staticmethod
     def _split_segment(
-        segment: TranscriptSegment,
+        segment: TranscriptSegment, *, unitization_version: str = EVIDENCE_UNITIZATION_VERSION,
     ) -> tuple[_MaterializedEvidenceUnit, ...]:
+        if unitization_version not in _EVIDENCE_UNIT_BOUNDARIES:
+            raise ExtractionValidationError("unsupported evidence unitization version")
         ranges = []
         start = 0
-        for match in EVIDENCE_UNIT_BOUNDARY_RE.finditer(segment.text):
+        for match in _EVIDENCE_UNIT_BOUNDARIES[unitization_version].finditer(segment.text):
             LocalExtractionService._append_bounded_ranges(
                 ranges, segment.text, start, match.end()
             )
