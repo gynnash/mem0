@@ -26,6 +26,12 @@ class SpeakerIdentityScopeError(ValueError):
     pass
 
 
+class _MixedActorOwnership(Exception):
+    def __init__(self, field_key, evidence_ids):
+        self.field_key = field_key
+        self.evidence_ids = tuple(evidence_ids)
+
+
 def plan_person_identity_merge(*, operation_key, user_id, workspace_id, base_state_version,
                                source_speaker_ids, target_speaker_id, source_object_ids,
                                target_object_id, target_name, evidence, objects, assertions, relations, now):
@@ -261,14 +267,19 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
                        row["payload"].get("attributes", {}).get("speaker_ref", "")).startswith("speaker:")}
 
     def previous_entity(item):
-        candidates = {row["object_id"] for row in objects if row["object_type"] == "entity"
-                      and row["payload"].get("attributes", {}).get("speaker_ref") == item.speaker_id
-                      and (str(item.speaker_id).startswith("speaker:") or item.evidence_id in row["evidence_ids"])}
+        matching = {row["object_id"] for row in objects if row["object_type"] == "entity"
+                    and row["payload"].get("attributes", {}).get("speaker_ref") == item.speaker_id
+                    and (str(item.speaker_id).startswith("speaker:") or item.evidence_id in row["evidence_ids"])}
+        supported = {row["object_id"] for row in objects if row["object_id"] in matching
+                     and item.evidence_id in row["evidence_ids"]}
+        candidates = supported or matching
         if len(candidates) > 1:
             raise SpeakerIdentityScopeError("speaker has multiple possible source entities")
         return next(iter(candidates), None)
     created_entities = set()
     ambiguities = []
+    review_fields = []
+    quarantined_objects = set()
     identity_decisions = identity_decisions or {}
     for item in evidence:
         if item.user_id != user_id or item.workspace_id != workspace_id:
@@ -349,8 +360,16 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
                                         "evidence_ids": list(refs),
                                         "previous_speaker_ref": previous, "target_speaker_ref": speaker})
         elif field_key and current_actor and any(actor and actor[0] == current_actor for actor in actors):
-            raise SpeakerIdentityScopeError("speaker-dependent actor has conflicting multi-source ownership")
+            raise _MixedActorOwnership(field_key, refs)
         return None
+
+    def quarantine(kind, identifier, error):
+        review_fields.append({"field_key": error.field_key, "evidence_ids": list(error.evidence_ids)})
+        retracts.append(RetractionMutation(logical_ref="ret:" + identifier,
+                        target_type=kind, target_id=identifier,
+                        reason="speaker_identity_mixed_source_review"))
+        if kind == "object":
+            quarantined_objects.add(identifier)
 
     def migrate_refs(value, key=""):
         if isinstance(value, dict):
@@ -382,16 +401,20 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         value = correct_display_fields(original_value, names_for(refs), text_value=True)
         reporter = (original_value.get("asserted_by_speaker_ref") if "asserted_by_speaker_ref" in original_value
                     else original_value.get("owner_mention")) if isinstance(original_value, dict) else None
-        actor = actor_for(refs, reporter,
-                          field_key="assertion:" + row["assertion_id"] + (
-                              "#reporter" if isinstance(original_value, dict) and "asserted_by_speaker_ref" in original_value else ""),
-                          current_actor=payload.get("asserted_by_entity_id"))
-        if actor and payload.get("asserted_by_entity_id") == actor[0]:
-            payload["asserted_by_entity_id"] = actor[1]
-            if isinstance(value, dict) and "asserted_by_speaker_ref" in value:
-                value["asserted_by_speaker_ref"] = identities[refs[0]][3]
-        if isinstance(value, dict):
-            value = correct_action_roles(value, refs, "assertion:" + row["assertion_id"])
+        try:
+            actor = actor_for(refs, reporter,
+                              field_key="assertion:" + row["assertion_id"] + (
+                                  "#reporter" if isinstance(original_value, dict) and "asserted_by_speaker_ref" in original_value else ""),
+                              current_actor=payload.get("asserted_by_entity_id"))
+            if actor and payload.get("asserted_by_entity_id") == actor[0]:
+                payload["asserted_by_entity_id"] = actor[1]
+                if isinstance(value, dict) and "asserted_by_speaker_ref" in value:
+                    value["asserted_by_speaker_ref"] = identities[refs[0]][3]
+            if isinstance(value, dict):
+                value = correct_action_roles(value, refs, "assertion:" + row["assertion_id"])
+        except _MixedActorOwnership as error:
+            quarantine("assertion", row["assertion_id"], error)
+            continue
         new_refs = refs_for(refs)
         if value == payload["value"] and new_refs == refs and payload == row["payload"]:
             continue
@@ -419,8 +442,12 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             owner_object = next((obj for obj in objects if obj["object_id"] == source), None)
             owner_attrs = owner_object["payload"].get("attributes", {}) if owner_object else {}
             owner_refs = tuple(owner_attrs.get("owner_evidence_ids") or refs)
-            actor = actor_for(owner_refs, owner_attrs.get("owner_speaker_ref") or owner_attrs.get("owner_mention"),
-                              field_key="object:" + source + "#executor", current_actor=target) if owner_object else None
+            try:
+                actor = actor_for(owner_refs, owner_attrs.get("owner_speaker_ref") or owner_attrs.get("owner_mention"),
+                                  field_key="object:" + source + "#executor", current_actor=target) if owner_object else None
+            except _MixedActorOwnership as error:
+                quarantine("relation", row["relation_id"], error)
+                continue
             if actor and target == actor[0]:
                 target = actor[1]
         new_id = _id("rel", operation_key, row["relation_id"])
@@ -440,12 +467,16 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         if row["object_type"] == "entity":
             names = {}
         after = migrate_refs(correct_display_fields(before, names))
-        actor = actor_for(tuple(before.get("attributes", {}).get("owner_evidence_ids") or refs),
-                          before.get("attributes", {}).get("owner_speaker_ref") or before.get("attributes", {}).get("owner_mention"),
-                          field_key="object:" + row["object_id"] + "#executor",
-                          current_actor=next((before.get(key) or before.get("attributes", {}).get(key)
-                                              for key in ("owner_entity_id", "committed_by", "decision_owner", "owner")
-                                              if before.get(key) or before.get("attributes", {}).get(key)), None))
+        try:
+            actor = actor_for(tuple(before.get("attributes", {}).get("owner_evidence_ids") or refs),
+                              before.get("attributes", {}).get("owner_speaker_ref") or before.get("attributes", {}).get("owner_mention"),
+                              field_key="object:" + row["object_id"] + "#executor",
+                              current_actor=next((before.get(key) or before.get("attributes", {}).get(key)
+                                                  for key in ("owner_entity_id", "committed_by", "decision_owner", "owner")
+                                                  if before.get(key) or before.get("attributes", {}).get(key)), None))
+        except _MixedActorOwnership as error:
+            quarantine("object", row["object_id"], error)
+            continue
         if actor:
             for field in ("owner", "owner_entity_id", "committed_by", "decision_owner"):
                 if before.get(field) == actor[0]:
@@ -457,8 +488,12 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             role_values = {**before.get("attributes", {}), **{
                 key: before[key] for key in ("committed_by",) if key in before
             }}
-            corrected_roles = correct_action_roles(role_values, refs, "object:" + row["object_id"],
-                executor_field="committed_by" if row["object_type"] == "commitment" else "owner_entity_id")
+            try:
+                corrected_roles = correct_action_roles(role_values, refs, "object:" + row["object_id"],
+                    executor_field="committed_by" if row["object_type"] == "commitment" else "owner_entity_id")
+            except _MixedActorOwnership as error:
+                quarantine("object", row["object_id"], error)
+                continue
             after["attributes"] = {**after.get("attributes", {}), **{
                 key: val for key, val in corrected_roles.items() if val != role_values.get(key)
             }}
@@ -482,9 +517,36 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
             object_type=row["object_type"], object_id=row["object_id"],
             expected_version=row["lock_version"], evidence_ids=new_refs, payload=patch,
         ))
+    if quarantined_objects:
+        retracted_assertions = {item.target_id for item in retracts if item.target_type == "assertion"}
+        for row in assertions:
+            if (row["payload"].get("subject_object_ref") in quarantined_objects
+                    or row["payload"].get("asserted_by_entity_id") in quarantined_objects):
+                if row["assertion_id"] not in retracted_assertions:
+                    retracts.append(RetractionMutation(logical_ref="ret:" + row["assertion_id"],
+                        target_type="assertion", target_id=row["assertion_id"],
+                        reason="speaker_identity_mixed_source_review"))
+                    retracted_assertions.add(row["assertion_id"])
+                replacement_id = assertion_map.pop(row["assertion_id"], None)
+                if replacement_id:
+                    assertion_changes = [mutation for mutation in assertion_changes
+                                         if mutation.assertion_id != replacement_id]
+        quarantined_relation_ids = {row["relation_id"] for row in relations
+                                    if row["source_object_id"] in quarantined_objects
+                                    or row["target_object_id"] in quarantined_objects}
+        retracted_relations = {item.target_id for item in retracts if item.target_type == "relation"}
+        for row in relations:
+            if row["relation_id"] in quarantined_relation_ids and row["relation_id"] not in retracted_relations:
+                retracts.append(RetractionMutation(logical_ref="ret:" + row["relation_id"],
+                    target_type="relation", target_id=row["relation_id"],
+                    reason="speaker_identity_mixed_source_review"))
+                retracted_relations.add(row["relation_id"])
+        replaced_ids = {_id("rel", operation_key, identifier) for identifier in quarantined_relation_ids}
+        relation_changes = [mutation for mutation in relation_changes
+                            if mutation.relation_id not in replaced_ids]
     if ambiguities:
         raise SpeakerIdentityAmbiguity(ambiguities)
-    if not (creates or object_changes or assertion_changes or relation_changes):
+    if not (creates or object_changes or assertion_changes or relation_changes or retracts):
         return None
     object_changes = [mutation.model_copy(update={"evidence_ids": refs_for(mutation.evidence_ids)})
                       if mutation.operation.value == "create" else mutation for mutation in object_changes]
@@ -499,6 +561,6 @@ def plan_speaker_name_correction(*, operation_key: str, user_id: str, workspace_
         retractions=tuple(retracts), domain_events=(DomainEvent(
             event_type="memory.speaker_names_corrected", aggregate_ref=str(workspace_id),
             payload={"reason": "speaker_name_correction", "evidence_replacements": remap,
-                     "assertion_replacements": assertion_map},
+                     "assertion_replacements": assertion_map, "review_required": review_fields},
         ),),
     ))
