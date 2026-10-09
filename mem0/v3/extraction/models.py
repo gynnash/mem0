@@ -159,6 +159,8 @@ class UnitBackedExtractedClaim(FrozenContract):
     asserted_by_speaker_ref: Optional[NonEmptyStr] = None
     initiator_mention: Optional[NonEmptyStr] = None
     owner_mention: Optional[NonEmptyStr] = None
+    initiator_evidence_ids: tuple[NonEmptyStr, ...] = ()
+    owner_evidence_ids: tuple[NonEmptyStr, ...] = ()
     action: Optional[NonEmptyStr] = None
     task_intent: Optional[TaskExecutionIntent] = None
     due_at: Optional[datetime] = None
@@ -215,6 +217,8 @@ class ExtractedClaim(FrozenContract):
     asserted_by_speaker_ref: Optional[NonEmptyStr] = None
     initiator_mention: Optional[NonEmptyStr] = None
     owner_mention: Optional[NonEmptyStr] = None
+    initiator_evidence_ids: tuple[NonEmptyStr, ...] = ()
+    owner_evidence_ids: tuple[NonEmptyStr, ...] = ()
     action: Optional[NonEmptyStr] = None
     task_intent: Optional[TaskExecutionIntent] = None
     due_at: Optional[datetime] = None
@@ -239,6 +243,10 @@ class ExtractedClaim(FrozenContract):
 
 
 def _validate_task_fields(claim) -> None:
+    for mention, role_refs in ((claim.owner_mention, claim.owner_evidence_ids),
+                               (claim.initiator_mention, claim.initiator_evidence_ids)):
+        if role_refs and (not mention or not set(role_refs).issubset(claim.episodic_evidence_ids)):
+            raise ValueError("role evidence must support a cited role in this claim")
     if claim.claim_type in {ClaimType.TASK, ClaimType.COMMITMENT} and claim.negated and claim.lifecycle_signal is ClaimLifecycleSignal.RESOLVED:
         raise ValueError("negated action claims cannot establish completion")
     if claim.claim_type is ClaimType.TASK and claim.action is None:

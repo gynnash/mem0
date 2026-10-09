@@ -383,6 +383,12 @@ class GlobalAlignmentService:
             claim_evidence = self._evidence_refs(
                 claim.episodic_evidence_ids, evidence_by_episode
             )
+            owner_evidence = self._evidence_refs(
+                claim.owner_evidence_ids, evidence_by_episode
+            ) or claim_evidence
+            initiator_evidence = self._evidence_refs(
+                claim.initiator_evidence_ids, evidence_by_episode
+            ) or claim_evidence
             owner_ref = entity_refs_by_mention.get(
                 _normalized(claim.owner_mention)
             )
@@ -411,6 +417,8 @@ class GlobalAlignmentService:
                         owner_ref=owner_ref,
                         owner_speaker_ref=owner_speaker_ref,
                         initiator_speaker_ref=initiator_speaker_ref,
+                        owner_evidence_ids=owner_evidence,
+                        initiator_evidence_ids=initiator_evidence,
                     )
                 )
                 continue
@@ -434,6 +442,8 @@ class GlobalAlignmentService:
                 initiator_ref=initiator_ref,
                 owner_speaker_ref=owner_speaker_ref,
                 initiator_speaker_ref=initiator_speaker_ref,
+                owner_evidence_ids=owner_evidence,
+                initiator_evidence_ids=initiator_evidence,
             )
             action_conflict = False
             if candidate is not None and claim.claim_type in {ClaimType.TASK, ClaimType.COMMITMENT}:
@@ -482,6 +492,8 @@ class GlobalAlignmentService:
                     owner_ref=owner_ref,
                     owner_speaker_ref=owner_speaker_ref,
                     initiator_speaker_ref=initiator_speaker_ref,
+                    owner_evidence_ids=owner_evidence,
+                    initiator_evidence_ids=initiator_evidence,
                 )
             )
             mutation_payload = payload
@@ -544,7 +556,7 @@ class GlobalAlignmentService:
                         source_ref=object_ref,
                         target_ref=owner_ref,
                         relation_type=relation_type,
-                        evidence_ids=claim_evidence,
+                        evidence_ids=owner_evidence,
                         valid_from=source.started_at,
                         confidence=claim.confidence,
                         epistemic_type=EpistemicType.REPORTED,
@@ -683,7 +695,8 @@ class GlobalAlignmentService:
     @staticmethod
     def _claim_payload(
         *, source, claim, canonical_key, evidence_ids, owner_ref=None, initiator_ref=None,
-        owner_speaker_ref=None, initiator_speaker_ref=None
+        owner_speaker_ref=None, initiator_speaker_ref=None,
+        owner_evidence_ids=(), initiator_evidence_ids=()
     ):
         payload = {
             "canonical_key": canonical_key,
@@ -708,9 +721,9 @@ class GlobalAlignmentService:
                 "initiator_mention": claim.initiator_mention,
                 "initiator_entity_id": initiator_ref,
                 "initiator_speaker_ref": initiator_speaker_ref,
-                "initiator_evidence_ids": evidence_ids if claim.initiator_mention else (),
+                "initiator_evidence_ids": initiator_evidence_ids if claim.initiator_mention else (),
                 "owner_speaker_ref": owner_speaker_ref,
-                "owner_evidence_ids": evidence_ids if claim.owner_mention else (),
+                "owner_evidence_ids": owner_evidence_ids if claim.owner_mention else (),
                 "execution_intent": claim.task_intent.value if claim.task_intent else None,
             })
             role_fields = {"action": claim.action, "initiator_mention": claim.initiator_mention,
@@ -721,7 +734,9 @@ class GlobalAlignmentService:
             )})
             role_fields["committed_by" if claim.claim_type is ClaimType.COMMITMENT else "owner_entity_id"] = owner_ref
             payload["field_provenance"] += tuple(
-                FieldProvenance(field_name=field, evidence_ids=evidence_ids)
+                FieldProvenance(field_name=field, evidence_ids=(
+                    owner_evidence_ids if field.startswith("owner_") or field == "committed_by" else
+                    initiator_evidence_ids if field.startswith("initiator_") else evidence_ids))
                 for field, value in role_fields.items() if value is not None
             )
         commitment_supported = not claim.negated and claim.modality.value in {"promised", "planned", "conditional"}
@@ -813,6 +828,8 @@ class GlobalAlignmentService:
         owner_ref=None,
         owner_speaker_ref=None,
         initiator_speaker_ref=None,
+        owner_evidence_ids=(),
+        initiator_evidence_ids=(),
     ):
         return AssertionMutation(
             logical_ref=logical_ref,
@@ -827,12 +844,12 @@ class GlobalAlignmentService:
                     "owner_mention": claim.owner_mention,
                     "owner_entity_id": owner_ref,
                     "owner_speaker_ref": owner_speaker_ref,
-                    "owner_evidence_ids": evidence_ids if claim.owner_mention else (),
+                    "owner_evidence_ids": owner_evidence_ids if claim.owner_mention else (),
                     "asserted_by_speaker_ref": claim.asserted_by_speaker_ref,
                     "initiator_mention": claim.initiator_mention,
                     "initiator_entity_id": initiator_ref,
                     "initiator_speaker_ref": initiator_speaker_ref,
-                    "initiator_evidence_ids": evidence_ids if claim.initiator_mention else (),
+                    "initiator_evidence_ids": initiator_evidence_ids if claim.initiator_mention else (),
                     "action": claim.action,
                     "task_intent": claim.task_intent.value if claim.task_intent else None,
                     "due_at": (

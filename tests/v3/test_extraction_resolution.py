@@ -173,6 +173,18 @@ def test_nonadjacent_evidence_is_split_without_another_model_call_or_lost_citati
     assert [source.segments[0].text[span.start_char:span.end_char] for span in spans] == ["Ship Friday;", "cancel launch."]
 
 
+def test_split_citation_keeps_role_support_ids_mapped_to_materialized_parts():
+    source = _source("Alice will ship Friday; discuss costs; cancel launch.")
+    model = FakeModel({"extraction_version": "test/v1", "episodic_evidence": [
+        {"evidence_id": "combined", "content": "Alice will ship Friday; cancel launch.",
+         "evidence_unit_ids": ["s1:u0", "s1:u2"], "confidence": 0.9},
+    ], "claims": [{"claim_id": "ship", "claim_type": "task", "text": "Alice will ship Friday.",
+                   "action": "Ship Friday", "owner_mention": "Alice", "owner_evidence_ids": ["combined"],
+                   "modality": "promised", "episodic_evidence_ids": ["combined"], "confidence": 0.9}]})
+    result = LocalExtractionService(model).extract(source)
+    assert result.claims[0].owner_evidence_ids == ("combined:part:1", "combined:part:2")
+
+
 @pytest.mark.parametrize("count", [5, 6, 17])
 def test_long_citations_preserve_all_units_and_semantic_references(count):
     source = _source("; ".join(f"Fact {i}" for i in range(count)))

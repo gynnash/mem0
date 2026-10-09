@@ -41,6 +41,10 @@ owner_mention = executor. Copy speaker refs exactly, add supported named roles t
 entity_mentions, and leave unsupported or ambiguous roles null. Speaking, participation,
 or subject association alone does not establish responsibility. Preserve direct versus
 reported statements; reporting another person's commitment does not change source speaker.
+For each non-null owner_mention or initiator_mention, cite the smallest supporting
+subset of that claim's episodic_evidence_ids in owner_evidence_ids or
+initiator_evidence_ids. Leave these arrays empty when the role is not established;
+do not cite every claim source merely because it mentions the same task.
 Emit tasks for concrete executable actions requested, assigned, or personally committed.
 Give a concise action and supported task_intent=requested, assigned, or self_committed;
 otherwise task_intent is null. Requests and assignments do not establish acceptance or

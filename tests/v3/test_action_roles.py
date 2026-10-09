@@ -92,6 +92,24 @@ def test_statement_initiator_and_executor_are_independent():
     assert assertion.payload.value["action"] == "Review the proposal"
 
 
+def test_owner_role_keeps_its_narrow_original_evidence():
+    changeset = _plan(_claim(episodic_evidence_ids=["e1", "e2"], owner_evidence_ids=["e2"],
+                            initiator_evidence_ids=["e1"]))
+    task = next(item for item in changeset.object_mutations if item.object_type is MemoryObjectType.TASK)
+    owner_ref = next(item.evidence.evidence_id for item in changeset.evidence_creates
+                     if item.evidence.source_id == "s2")
+    assert task.payload.attributes["owner_evidence_ids"] == (owner_ref,)
+    assert changeset.assertion_mutations[0].payload.value["owner_evidence_ids"] == (owner_ref,)
+    owner_relation = next(item for item in changeset.relation_mutations
+                          if item.relation_type.value == "owned_by")
+    assert owner_relation.evidence_ids == (owner_ref,)
+
+
+def test_role_evidence_must_be_within_claim_support():
+    with pytest.raises(ValueError, match="role evidence"):
+        ExtractedClaim.model_validate(_claim(owner_evidence_ids=["e2"]))
+
+
 def test_reported_commitment_preserves_reporter_separately_from_executor():
     changeset = _plan(_claim(claim_type="commitment", task_intent="self_committed", modality="promised",
                             initiator_mention=None), first_text="Bob told me he committed to reviewing the proposal.")

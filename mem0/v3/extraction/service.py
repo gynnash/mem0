@@ -208,12 +208,15 @@ class LocalExtractionService:
             replacements[item.evidence_id] = tuple(ids)
             warnings.append(f"Evidence {item.evidence_id} split into source-quoted citation groups.")
         updates = {"episodic_evidence": tuple(episodes), "warnings": tuple(warnings)}
+        def mapped_refs(values):
+            return tuple(dict.fromkeys(replacement for value in values
+                                       for replacement in replacements.get(value, (value,))))
         for field in ("claims", "entity_mentions", "project_mentions", "topic_candidates"):
             updates[field] = tuple(item.model_copy(update={
-                "episodic_evidence_ids": tuple(dict.fromkeys(
-                    replacement for value in item.episodic_evidence_ids
-                    for replacement in replacements.get(value, (value,))
-                )),
+                "episodic_evidence_ids": mapped_refs(item.episodic_evidence_ids),
+                **({"owner_evidence_ids": mapped_refs(item.owner_evidence_ids),
+                    "initiator_evidence_ids": mapped_refs(item.initiator_evidence_ids)}
+                   if field == "claims" else {}),
             }) for item in getattr(result, field))
         return result.model_copy(update=updates)
 
