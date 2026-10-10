@@ -178,14 +178,12 @@ class MemoryQueryService:
     def select_open_loops(
         objects: Sequence[Mapping[str, Any]],
     ) -> tuple[Mapping[str, Any], ...]:
+        from .weekly_signals import is_open_loop
+
         return tuple(
             item
             for item in objects
-            if item.get("workflow_status") not in {"completed", "cancelled"}
-            and (item.get("attributes") or {}).get("fulfillment_status")
-            != "completed"
-            and (item.get("attributes") or {}).get("resolution_status")
-            not in {"resolved", "completed"}
+            if is_open_loop(item)
         )
 
     @staticmethod
